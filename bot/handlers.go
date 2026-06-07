@@ -17,20 +17,45 @@ import (
 )
 
 const (
-	maxSymbolLen   = 20       // макс. длина символа монеты от пользователя
-	maxAmount      = 1e15     // макс. количество монет
-	maxPrice       = 1e12     // макс. цена покупки
-	rateLimitCount = 5        // запросов...
+	maxSymbolLen    = 20          // макс. длина символа монеты от пользователя
+	maxAmount       = 1e15        // макс. количество монет
+	maxPrice        = 1e12        // макс. цена покупки
+	rateLimitCount  = 5           // запросов...
 	rateLimitWindow = time.Minute // ...в минуту на пользователя
 )
 
+// ─── Inline-меню ─────────────────────────────────────────────────────────────
+
+var mainMenu = &tele.ReplyMarkup{}
+
+var (
+	btnMarket    = mainMenu.Data("📊 Рынок", "cb_market")
+	btnRecommend = mainMenu.Data("🎯 Рекомендации", "cb_recommend")
+	btnPortfolio = mainMenu.Data("💼 Портфель", "cb_portfolio")
+	btnBybit     = mainMenu.Data("💎 Bybit", "cb_bybit")
+	btnNews      = mainMenu.Data("📰 Новости китов", "cb_news")
+	btnUnlocks   = mainMenu.Data("🔓 Разлоки", "cb_unlocks")
+	btnHelp      = mainMenu.Data("❓ Помощь", "cb_help")
+)
+
+func init() {
+	mainMenu.Inline(
+		mainMenu.Row(btnMarket, btnRecommend),
+		mainMenu.Row(btnPortfolio, btnBybit),
+		mainMenu.Row(btnNews, btnUnlocks),
+		mainMenu.Row(btnHelp),
+	)
+}
+
+// ─── Bot struct ───────────────────────────────────────────────────────────────
+
 type Bot struct {
-	tele          *tele.Bot
-	db            *db.DB
-	crypto        *crypto.Client
-	news          *news.Client
-	unlocks       *unlocks.Client
-	limiter       *RateLimiter
+	tele    *tele.Bot
+	db      *db.DB
+	crypto  *crypto.Client
+	news    *news.Client
+	unlocks *unlocks.Client
+	limiter *RateLimiter
 }
 
 func New(b *tele.Bot, d *db.DB, c *crypto.Client, n *news.Client, u *unlocks.Client) *Bot {
@@ -45,6 +70,7 @@ func New(b *tele.Bot, d *db.DB, c *crypto.Client, n *news.Client, u *unlocks.Cli
 }
 
 func (bot *Bot) Register() {
+	// Текстовые команды
 	bot.tele.Handle("/start", bot.protected(bot.handleStart))
 	bot.tele.Handle("/market", bot.protected(bot.handleMarket))
 	bot.tele.Handle("/recommend", bot.protected(bot.handleRecommend))
@@ -55,8 +81,17 @@ func (bot *Bot) Register() {
 	bot.tele.Handle("/bybit", bot.protected(bot.handleBybit))
 	bot.tele.Handle("/news", bot.protected(bot.handleNews))
 	bot.tele.Handle("/unlock-tokens", bot.protected(bot.handleUnlockTokens))
-	bot.tele.Handle("/unlock", bot.protected(bot.handleUnlockTokens)) // алиас
+	bot.tele.Handle("/unlock", bot.protected(bot.handleUnlockTokens))  // алиас
 	bot.tele.Handle("/unlocks", bot.protected(bot.handleUnlockTokens)) // алиас
+
+	// Callback-кнопки inline-меню
+	bot.tele.Handle(&btnMarket, bot.protected(bot.handleMarketCallback))
+	bot.tele.Handle(&btnRecommend, bot.protected(bot.handleRecommendCallback))
+	bot.tele.Handle(&btnPortfolio, bot.protected(bot.handlePortfolioCallback))
+	bot.tele.Handle(&btnBybit, bot.protected(bot.handleBybitCallback))
+	bot.tele.Handle(&btnNews, bot.protected(bot.handleNewsCallback))
+	bot.tele.Handle(&btnUnlocks, bot.protected(bot.handleUnlocksCallback))
+	bot.tele.Handle(&btnHelp, bot.protected(bot.handleHelpCallback))
 }
 
 // protected — middleware: nil-проверка sender + rate limit
@@ -67,7 +102,7 @@ func (bot *Bot) protected(next tele.HandlerFunc) tele.HandlerFunc {
 		}
 		userID := c.Sender().ID
 		if !bot.limiter.Allow(userID) {
-			return send(c, "⏳ Слишком много запросов. Подождите минуту.")
+			return c.Send("⏳ Слишком много запросов. Подождите минуту.")
 		}
 		if err := next(c); err != nil {
 			// Логируем внутренние ошибки, пользователю — общий ответ
@@ -81,12 +116,19 @@ func send(c tele.Context, text string) error {
 	return c.Send(text)
 }
 
+// sendMenu отправляет текст с inline-меню
+func sendMenu(c tele.Context, text string) error {
+	return c.Send(text, mainMenu)
+}
+
+// ─── Обработчики команд ───────────────────────────────────────────────────────
+
 func (bot *Bot) handleStart(c tele.Context) error {
-	return send(c, "👋 Crypto Bot запущен!\n\n"+helpText())
+	return sendMenu(c, "👋 Добро пожаловать в Crypto Bot!\n\nВыберите действие в меню или введите команду вручную:")
 }
 
 func (bot *Bot) handleHelp(c tele.Context) error {
-	return send(c, helpText())
+	return sendMenu(c, helpText())
 }
 
 func helpText() string {
@@ -108,6 +150,48 @@ Bybit интеграция:
 Примеры:
 /add btc 0.5 65000
 /remove btc`
+}
+
+// ─── Callback-обработчики кнопок ─────────────────────────────────────────────
+
+// callbackAnswer подтверждает нажатие кнопки (убирает "часики" в Telegram)
+func callbackAnswer(c tele.Context) {
+	_ = c.Respond()
+}
+
+func (bot *Bot) handleMarketCallback(c tele.Context) error {
+	callbackAnswer(c)
+	return bot.handleMarket(c)
+}
+
+func (bot *Bot) handleRecommendCallback(c tele.Context) error {
+	callbackAnswer(c)
+	return bot.handleRecommend(c)
+}
+
+func (bot *Bot) handlePortfolioCallback(c tele.Context) error {
+	callbackAnswer(c)
+	return bot.handlePortfolio(c)
+}
+
+func (bot *Bot) handleBybitCallback(c tele.Context) error {
+	callbackAnswer(c)
+	return bot.handleBybit(c)
+}
+
+func (bot *Bot) handleNewsCallback(c tele.Context) error {
+	callbackAnswer(c)
+	return bot.handleNews(c)
+}
+
+func (bot *Bot) handleUnlocksCallback(c tele.Context) error {
+	callbackAnswer(c)
+	return bot.handleUnlockTokens(c)
+}
+
+func (bot *Bot) handleHelpCallback(c tele.Context) error {
+	callbackAnswer(c)
+	return sendMenu(c, helpText())
 }
 
 func (bot *Bot) handleMarket(c tele.Context) error {
