@@ -10,12 +10,12 @@ import (
 	"time"
 )
 
-// DeFiLlama Emissions API — бесплатно, без регистрации и ключей
+// CoinGecko — бесплатно, без ключей. Используем для оценки потенциала дилюции токенов:
+// чем больше разница между total_supply и circulating_supply, тем больше монет
+// ещё предстоит выпустить в обращение (= потенциальное давление разлоков).
 const (
-	listURL      = "https://defillama-datasets.llama.fi/emissionsProtocolsList"
-	overviewURL  = "https://defillama-datasets.llama.fi/emissionsProtocolOverview/%s.json"
+	marketsURL   = "https://api.coingecko.com/api/v3/coins/markets"
 	maxBodyBytes = 5 * 1024 * 1024
-	maxProtocols = 40 // проверяем топ-40 протоколов
 )
 
 type Client struct {
@@ -23,205 +23,205 @@ type Client struct {
 }
 
 func NewClient() *Client {
-	return &Client{
-		http: &http.Client{Timeout: 10 * time.Second},
-	}
+	return &Client{http: &http.Client{Timeout: 15 * time.Second}}
 }
 
-// UnlockEvent — одно событие разлока
-type UnlockEvent struct {
-	Protocol  string
-	Label     string  // название токена/проекта
-	Date      time.Time
-	DaysLeft  int
-	Amount    float64 // кол-во токенов
-	USDValue  float64 // ~стоимость в USD (если есть)
-	EventType string  // cliff, linear, etc.
+// ─── Модели ────────────────────────────────────────────────────────────────
+
+type coin struct {
+	ID              string  `json:"id"`
+	Symbol          string  `json:"symbol"`
+	Name            string  `json:"name"`
+	CurrentPrice    float64 `json:"current_price"`
+	MarketCap       float64 `json:"market_cap"`
+	MarketCapRank   int     `json:"market_cap_rank"`
+	CirculatingSupp float64 `json:"circulating_supply"`
+	TotalSupply     float64 `json:"total_supply"`
+	MaxSupply       float64 `json:"max_supply"`
+	ATL             float64 `json:"atl"`
 }
 
-// ─── Модели DeFiLlama ─────────────────────────────────────────────────────
-
-type protocolOverview struct {
-	Name           string           `json:"name"`
-	Symbol         string           `json:"symbol"`
-	CoinGeckoID    string           `json:"coinGeckoId"`
-	Unlockschedule []unlockSchedule `json:"unlockSchedule"`
-	Price          float64          `json:"price"`
-}
-
-type unlockSchedule struct {
-	Timestamp int64   `json:"timestamp"`
-	Amount    float64 `json:"amount"`
-	NoOfCoins float64 `json:"noOfCoins"`
+// UnlockRisk — оценка риска разлоков для конкретной монеты
+type UnlockRisk struct {
+	Name             string
+	Symbol           string
+	Rank             int
+	Price            float64
+	Circulating      float64
+	TotalSupply      float64
+	LockedTokens     float64 // total_supply - circulating_supply
+	LockedPercent    float64 // % от total_supply, который ещё не в обращении
+	DilutionPotential float64 // во сколько раз может вырасти supply
+	LockedUSDValue   float64 // потенциальное давление продажи в USD
+	RiskLevel        string  // 🟢 low, 🟡 medium, 🔴 high, ⚫ extreme
 }
 
 // ─── Получение данных ────────────────────────────────────────────────────
 
-func (c *Client) fetchJSON(url string, out any) error {
+func (c *Client) fetchMarkets() ([]coin, error) {
+	url := fmt.Sprintf(
+		"%s?vs_currency=usd&order=market_cap_desc&per_page=100&page=1&sparkline=false",
+		marketsURL,
+	)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "crypto-bot/1.0")
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("ошибка сети: %w", err)
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == 429 {
+		return nil, fmt.Errorf("CoinGecko rate limit — подождите минуту")
+	}
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("статус %d", resp.StatusCode)
+		return nil, fmt.Errorf("CoinGecko вернул статус %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return json.Unmarshal(body, out)
+
+	var coins []coin
+	if err := json.Unmarshal(body, &coins); err != nil {
+		return nil, fmt.Errorf("ошибка парсинга: %w", err)
+	}
+	return coins, nil
 }
 
-// FetchUpcoming возвращает предстоящие разлоки из DeFiLlama
-func (c *Client) FetchUpcoming() ([]UnlockEvent, error) {
-	// Шаг 1: получаем список протоколов
-	var protocols []string
-	if err := c.fetchJSON(listURL, &protocols); err != nil {
-		return nil, fmt.Errorf("не удалось получить список протоколов: %w", err)
+// FetchHighRisk возвращает монеты с наибольшим риском разлоков
+func (c *Client) FetchHighRisk() ([]UnlockRisk, error) {
+	coins, err := c.fetchMarkets()
+	if err != nil {
+		return nil, err
 	}
 
-	if len(protocols) > maxProtocols {
-		protocols = protocols[:maxProtocols]
+	// Стейблкоины не интересуют
+	stables := map[string]bool{
+		"tether": true, "usd-coin": true, "binance-usd": true,
+		"dai": true, "true-usd": true, "frax": true, "paxos-standard": true,
+		"first-digital-usd": true, "ethena-usde": true, "usdd": true,
 	}
 
-	now := time.Now()
-	horizon := now.AddDate(0, 2, 0) // следующие 2 месяца
+	var risks []UnlockRisk
 
-	var events []UnlockEvent
-
-	// Шаг 2: для каждого протокола смотрим расписание разлоков
-	for _, slug := range protocols {
-		var overview protocolOverview
-		url := fmt.Sprintf(overviewURL, slug)
-		if err := c.fetchJSON(url, &overview); err != nil {
-			continue // пропускаем ошибочные
+	for _, coin := range coins {
+		if stables[coin.ID] {
+			continue
 		}
 
-		for _, sched := range overview.Unlockschedule {
-			eventTime := time.Unix(sched.Timestamp, 0).UTC()
-
-			// Только будущие события в горизонте 2 месяца
-			if eventTime.Before(now) || eventTime.After(horizon) {
-				continue
-			}
-
-			amount := sched.NoOfCoins
-			if amount == 0 {
-				amount = sched.Amount
-			}
-
-			usdValue := 0.0
-			if overview.Price > 0 {
-				usdValue = amount * overview.Price
-			}
-
-			label := overview.Name
-			if overview.Symbol != "" {
-				label = fmt.Sprintf("%s (%s)", overview.Name, strings.ToUpper(overview.Symbol))
-			}
-
-			events = append(events, UnlockEvent{
-				Protocol:  slug,
-				Label:     label,
-				Date:      eventTime,
-				DaysLeft:  int(time.Until(eventTime).Hours() / 24),
-				Amount:    amount,
-				USDValue:  usdValue,
-				EventType: "unlock",
-			})
+		// Нужны данные по supply
+		supply := coin.TotalSupply
+		if supply == 0 {
+			supply = coin.MaxSupply
 		}
+		if supply == 0 || coin.CirculatingSupp == 0 {
+			continue
+		}
+		if coin.CirculatingSupp >= supply {
+			continue // нечего разлочивать
+		}
+
+		locked := supply - coin.CirculatingSupp
+		lockedPct := (locked / supply) * 100
+		dilution := supply / coin.CirculatingSupp
+		lockedUSD := locked * coin.CurrentPrice
+
+		// Фильтруем шум: минимум $10M потенциальной дилюции
+		if lockedUSD < 10_000_000 {
+			continue
+		}
+
+		risks = append(risks, UnlockRisk{
+			Name:              coin.Name,
+			Symbol:            strings.ToUpper(coin.Symbol),
+			Rank:              coin.MarketCapRank,
+			Price:             coin.CurrentPrice,
+			Circulating:       coin.CirculatingSupp,
+			TotalSupply:       supply,
+			LockedTokens:      locked,
+			LockedPercent:     lockedPct,
+			DilutionPotential: dilution,
+			LockedUSDValue:    lockedUSD,
+			RiskLevel:         calcRiskLevel(lockedPct, dilution),
+		})
 	}
 
-	// Сортируем по дате
-	sort.Slice(events, func(i, j int) bool {
-		return events[i].Date.Before(events[j].Date)
+	// Сортируем по проценту заблокированных токенов
+	sort.Slice(risks, func(i, j int) bool {
+		return risks[i].LockedPercent > risks[j].LockedPercent
 	})
 
-	// Убираем дубли (один проект может иметь несколько событий)
-	events = deduplicate(events)
-
-	return events, nil
+	return risks, nil
 }
 
-// deduplicate оставляет для каждого протокола только ближайшее событие
-func deduplicate(events []UnlockEvent) []UnlockEvent {
-	seen := map[string]bool{}
-	var result []UnlockEvent
-	for _, e := range events {
-		if !seen[e.Protocol] {
-			seen[e.Protocol] = true
-			result = append(result, e)
-		}
+func calcRiskLevel(lockedPct, dilution float64) string {
+	switch {
+	case lockedPct >= 70 || dilution >= 5:
+		return "⚫ ЭКСТРЕМАЛЬНЫЙ"
+	case lockedPct >= 50 || dilution >= 3:
+		return "🔴 ВЫСОКИЙ"
+	case lockedPct >= 30 || dilution >= 1.8:
+		return "🟡 СРЕДНИЙ"
+	default:
+		return "🟢 НИЗКИЙ"
 	}
-	return result
 }
 
 // ─── Форматирование ───────────────────────────────────────────────────────
 
-func Format(events []UnlockEvent) string {
-	if len(events) == 0 {
-		return "📭 Предстоящих разлоков токенов не найдено на ближайшие 2 месяца."
+func Format(risks []UnlockRisk) string {
+	if len(risks) == 0 {
+		return "📭 Данные по разлокам недоступны. Попробуйте позже."
 	}
 
 	var sb strings.Builder
-	sb.WriteString("🔓 Предстоящие разлоки токенов\n")
-	sb.WriteString("(источник: DeFiLlama • ближайшие 2 месяца)\n\n")
+	sb.WriteString("🔓 Риск разлоков токенов\n")
+	sb.WriteString("(топ-100 монет по риску дилюции — источник: CoinGecko)\n\n")
 
-	limit := 15
-	if len(events) < limit {
-		limit = len(events)
+	limit := 12
+	if len(risks) < limit {
+		limit = len(risks)
 	}
 
 	for i := 0; i < limit; i++ {
-		e := events[i]
-		emoji := urgencyEmoji(e.DaysLeft)
-		dateStr := e.Date.Format("02.01.2006")
+		r := risks[i]
 
-		line := fmt.Sprintf("%s %s\n   📅 %s — через %d дн.\n",
-			emoji, e.Label, dateStr, e.DaysLeft)
-
-		// Объём разлока
-		if e.Amount > 0 {
-			line += fmt.Sprintf("   💰 Объём: %s токенов", formatLargeNumber(e.Amount))
-			if e.USDValue > 0 {
-				line += fmt.Sprintf(" (~$%s)", formatLargeNumber(e.USDValue))
-			}
-			line += "\n"
-		}
-
-		// Предупреждение о давлении продавцов
-		if e.USDValue > 50_000_000 { // >$50M — крупный разлок
-			line += "   ⚠️ Крупный разлок — возможное давление продавцов!\n"
-		}
-
-		sb.WriteString(line + "\n")
+		sb.WriteString(fmt.Sprintf(
+			"%d. %s (%s) — #%d по капе\n",
+			i+1, r.Name, r.Symbol, r.Rank,
+		))
+		sb.WriteString(fmt.Sprintf("   %s\n", r.RiskLevel))
+		sb.WriteString(fmt.Sprintf(
+			"   🔒 Заблокировано: %s (%.1f%% от supply)\n",
+			formatLargeNumber(r.LockedTokens), r.LockedPercent,
+		))
+		sb.WriteString(fmt.Sprintf(
+			"   💰 Потенциал давления: ~$%s\n",
+			formatLargeNumber(r.LockedUSDValue),
+		))
+		sb.WriteString(fmt.Sprintf(
+			"   📈 Возможная дилюция: x%.1f\n\n",
+			r.DilutionPotential,
+		))
 	}
 
 	sb.WriteString("─────────────────────────\n")
-	sb.WriteString("🔴 <7 дн.  🟡 <30 дн.  🟢 >30 дн.\n")
-	sb.WriteString("⚠️ Крупные разлоки = риск коррекции. Учитывайте в стратегии!")
-	return sb.String()
-}
+	sb.WriteString("⚫ ЭКСТРЕМАЛЬНЫЙ — >70% supply заблокировано\n")
+	sb.WriteString("🔴 ВЫСОКИЙ — 50-70% заблокировано\n")
+	sb.WriteString("🟡 СРЕДНИЙ — 30-50% заблокировано\n")
+	sb.WriteString("🟢 НИЗКИЙ — <30% заблокировано\n\n")
+	sb.WriteString("⚠️ Чем больше заблокированных токенов, тем выше риск\n")
+	sb.WriteString("    давления продавцов при будущих разлоках.\n")
+	sb.WriteString("    Учитывайте это в долгосрочной стратегии!")
 
-func urgencyEmoji(days int) string {
-	switch {
-	case days <= 7:
-		return "🔴"
-	case days <= 30:
-		return "🟡"
-	default:
-		return "🟢"
-	}
+	return sb.String()
 }
 
 func formatLargeNumber(n float64) string {

@@ -1,29 +1,38 @@
 package news
 
 import (
-	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
-const (
-	newsURL      = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN&sortOrder=latest&extraParams=crypto-bot"
-	maxBodyBytes = 3 * 1024 * 1024
-)
-
-type Article struct {
-	Title       string `json:"title"`
-	Body        string `json:"body"`
-	URL         string `json:"url"`
-	Source      string `json:"source_info"`
-	PublishedOn int64  `json:"published_on"`
+// Источники крипто-новостей (RSS — бесплатно, без ключей)
+var feeds = []feedSource{
+	{Name: "Cointelegraph", URL: "https://cointelegraph.com/rss"},
+	{Name: "Decrypt", URL: "https://decrypt.co/feed"},
+	{Name: "CoinDesk", URL: "https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml"},
+	{Name: "Bitcoin Magazine", URL: "https://bitcoinmagazine.com/.rss/full/"},
 }
 
-type response struct {
-	Data []Article `json:"Data"`
+const maxBodyBytes = 5 * 1024 * 1024
+
+type feedSource struct {
+	Name string
+	URL  string
+}
+
+type Article struct {
+	Title       string
+	Description string
+	URL         string
+	Source      string
+	PublishedAt time.Time
 }
 
 type Client struct {
@@ -31,77 +40,203 @@ type Client struct {
 }
 
 func NewClient() *Client {
-	return &Client{http: &http.Client{Timeout: 12 * time.Second}}
+	return &Client{
+		http: &http.Client{
+			Timeout: 12 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) >= 5 {
+					return http.ErrUseLastResponse
+				}
+				return nil
+			},
+		},
+	}
 }
 
+// ─── RSS-парсинг ──────────────────────────────────────────────────────────
+
+type rssFeed struct {
+	XMLName xml.Name  `xml:"rss"`
+	Channel rssChannel `xml:"channel"`
+}
+
+type rssChannel struct {
+	Items []rssItem `xml:"item"`
+}
+
+type rssItem struct {
+	Title       string `xml:"title"`
+	Link        string `xml:"link"`
+	Description string `xml:"description"`
+	PubDate     string `xml:"pubDate"`
+}
+
+// FetchLatest параллельно тянет новости из всех источников
 func (c *Client) FetchLatest() ([]Article, error) {
-	req, err := http.NewRequest("GET", newsURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("ошибка запроса: %w", err)
+	var (
+		mu       sync.Mutex
+		wg       sync.WaitGroup
+		all      []Article
+		errCount int
+	)
+
+	for _, f := range feeds {
+		wg.Add(1)
+		go func(src feedSource) {
+			defer wg.Done()
+			articles, err := c.fetchOne(src)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errCount++
+				return
+			}
+			all = append(all, articles...)
+		}(f)
 	}
-	req.Header.Set("Accept", "application/json")
+	wg.Wait()
+
+	if len(all) == 0 {
+		return nil, fmt.Errorf("все источники новостей недоступны (%d ошибок)", errCount)
+	}
+
+	// Сортируем по дате — самые свежие первые
+	sort.Slice(all, func(i, j int) bool {
+		return all[i].PublishedAt.After(all[j].PublishedAt)
+	})
+
+	// Ограничиваем 60 самыми свежими
+	if len(all) > 60 {
+		all = all[:60]
+	}
+
+	return all, nil
+}
+
+func (c *Client) fetchOne(src feedSource) ([]Article, error) {
+	req, err := http.NewRequest("GET", src.URL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/rss+xml, application/xml, text/xml")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; crypto-bot/1.0)")
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("ошибка сети: %w", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("API вернул статус %d", resp.StatusCode)
+		return nil, fmt.Errorf("статус %d от %s", resp.StatusCode, src.Name)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if err != nil {
-		return nil, fmt.Errorf("ошибка чтения: %w", err)
+		return nil, err
 	}
 
-	var res response
-	if err := json.Unmarshal(body, &res); err != nil {
-		return nil, fmt.Errorf("ошибка парсинга: %w", err)
+	var feed rssFeed
+	if err := xml.Unmarshal(body, &feed); err != nil {
+		return nil, fmt.Errorf("парсинг XML %s: %w", src.Name, err)
 	}
-	return res.Data, nil
+
+	var articles []Article
+	for _, item := range feed.Channel.Items {
+		pubTime := parsePubDate(item.PubDate)
+		// Игнорируем статьи старше 7 дней
+		if time.Since(pubTime) > 7*24*time.Hour {
+			continue
+		}
+		articles = append(articles, Article{
+			Title:       cleanText(item.Title),
+			Description: cleanText(item.Description),
+			URL:         strings.TrimSpace(item.Link),
+			Source:      src.Name,
+			PublishedAt: pubTime,
+		})
+	}
+	return articles, nil
+}
+
+var htmlTagRe = regexp.MustCompile(`<[^>]+>`)
+
+func cleanText(s string) string {
+	s = htmlTagRe.ReplaceAllString(s, "")
+	s = strings.ReplaceAll(s, "&nbsp;", " ")
+	s = strings.ReplaceAll(s, "&amp;", "&")
+	s = strings.ReplaceAll(s, "&quot;", `"`)
+	s = strings.ReplaceAll(s, "&#39;", "'")
+	s = strings.ReplaceAll(s, "&lt;", "<")
+	s = strings.ReplaceAll(s, "&gt;", ">")
+	return strings.TrimSpace(s)
+}
+
+func parsePubDate(s string) time.Time {
+	formats := []string{
+		time.RFC1123Z,
+		time.RFC1123,
+		time.RFC822Z,
+		time.RFC822,
+		"Mon, 2 Jan 2006 15:04:05 -0700",
+		"2006-01-02T15:04:05Z",
+		"2006-01-02T15:04:05-07:00",
+	}
+	for _, f := range formats {
+		if t, err := time.Parse(f, strings.TrimSpace(s)); err == nil {
+			return t
+		}
+	}
+	return time.Now()
 }
 
 // ─── Анализ китовых сигналов ───────────────────────────────────────────────
 
 type Signal struct {
 	Article    Article
-	WhaleScore int    // насколько статья про китов (0-10)
-	Sentiment  int    // >0 бычий, <0 медвежий, 0 нейтральный
-	Label      string // BUY / SELL / HOLD
+	WhaleScore int
+	Sentiment  int
+	Label      string
 }
 
 var bullishKeywords = []string{
-	"whale buying", "whale accumulation", "whales accumulate",
-	"institutional buying", "large purchase", "massive buy",
-	"bullish", "accumulate", "inflow", "buy the dip",
-	"record inflow", "etf inflow", "spot etf",
+	"whale buying", "whale accumulation", "whales accumulate", "whales buy",
+	"institutional buying", "large purchase", "massive buy", "billion-dollar buy",
+	"bullish", "accumulate", "inflow", "buy the dip", "spot etf inflow",
+	"record inflow", "etf inflow", "treasury purchase", "smart money",
+	"long position", "leverage long", "bullish bet", "moves to wallet",
+	"withdraw from exchange", "exchange outflow", "hodl",
 }
 
 var bearishKeywords = []string{
-	"whale selling", "whale dump", "whale transfer",
-	"large withdrawal", "exchange inflow", "sell-off",
-	"bearish", "dump", "outflow", "panic sell",
-	"liquidation", "massive sell", "exchange deposit",
+	"whale selling", "whale dump", "whale transfer to exchange",
+	"large withdrawal", "exchange inflow", "sell-off", "selling pressure",
+	"bearish", "dump", "outflow from etf", "panic sell", "etf outflow",
+	"liquidation", "massive sell", "exchange deposit", "moves to exchange",
+	"deposit to exchange", "short position", "leverage short",
+	"unlock pressure", "selling pressure", "capitulation",
 }
 
 var whaleKeywords = []string{
-	"whale", "whales", "large holder", "big player",
-	"institutional", "billion", "million btc", "million eth",
-	"on-chain", "wallet", "cold wallet", "exchange transfer",
-	"satoshi", "unlock", "vesting", "large transaction",
+	"whale", "whales", "large holder", "big player", "mega whale",
+	"institutional", "billion", "million btc", "million eth", "million in",
+	"on-chain", "wallet", "cold wallet", "exchange transfer", "movement",
+	"satoshi-era", "satoshi era", "unlock", "vesting", "large transaction",
+	"dormant", "moved", "transferred", "long-term holder", "lth",
+	"micro strategy", "microstrategy", "blackrock", "fidelity", "grayscale",
+	"etf", "spot etf", "treasury", "fund", "hedge fund",
 }
 
+// Analyze фильтрует и оценивает статьи про китов
 func Analyze(articles []Article) []Signal {
 	var signals []Signal
 
 	for _, a := range articles {
-		text := strings.ToLower(a.Title + " " + a.Body)
+		text := strings.ToLower(a.Title + " " + a.Description)
 
 		whaleScore := countKeywords(text, whaleKeywords)
 		if whaleScore == 0 {
-			continue // не про китов — пропускаем
+			continue
 		}
 
 		bullScore := countKeywords(text, bullishKeywords)
@@ -109,9 +244,10 @@ func Analyze(articles []Article) []Signal {
 		sentiment := bullScore - bearScore
 
 		label := "🟡 HOLD"
-		if sentiment > 0 {
+		switch {
+		case sentiment > 0:
 			label = "🟢 BUY"
-		} else if sentiment < 0 {
+		case sentiment < 0:
 			label = "🔴 SELL"
 		}
 
@@ -123,14 +259,13 @@ func Analyze(articles []Article) []Signal {
 		})
 	}
 
-	// Сортируем по whale score убыванию
-	for i := 0; i < len(signals)-1; i++ {
-		for j := i + 1; j < len(signals); j++ {
-			if signals[j].WhaleScore > signals[i].WhaleScore {
-				signals[i], signals[j] = signals[j], signals[i]
-			}
+	// Сортировка: сначала по whaleScore, потом по новизне
+	sort.Slice(signals, func(i, j int) bool {
+		if signals[i].WhaleScore != signals[j].WhaleScore {
+			return signals[i].WhaleScore > signals[j].WhaleScore
 		}
-	}
+		return signals[i].Article.PublishedAt.After(signals[j].Article.PublishedAt)
+	})
 
 	if len(signals) > 7 {
 		signals = signals[:7]
@@ -138,10 +273,9 @@ func Analyze(articles []Article) []Signal {
 	return signals
 }
 
-// OverallRecommendation формирует итоговую оценку по всем сигналам
 func OverallRecommendation(signals []Signal) string {
 	if len(signals) == 0 {
-		return "🤷 Китовой активности не обнаружено. Рынок спокоен."
+		return "🤷 Китовой активности в новостях не обнаружено. Рынок спокоен."
 	}
 
 	totalSentiment := 0
@@ -185,23 +319,22 @@ func OverallRecommendation(signals []Signal) string {
 
 func FormatSignals(signals []Signal) string {
 	if len(signals) == 0 {
-		return "Новостей о движениях китов не найдено."
+		return ""
 	}
 
 	var sb strings.Builder
 	for i, s := range signals {
-		t := time.Unix(s.Article.PublishedOn, 0).UTC().Format("02.01 15:04")
-		// Обрезаем заголовок если слишком длинный
+		t := s.Article.PublishedAt.UTC().Format("02.01 15:04")
 		title := s.Article.Title
-		if len(title) > 90 {
-			title = title[:87] + "..."
+		if len(title) > 95 {
+			title = title[:92] + "..."
 		}
 		sb.WriteString(fmt.Sprintf(
-			"%d. %s  [%s]\n   %s\n   🐋 Активность китов: %s | Время: %s UTC\n\n",
+			"%d. %s  [%s]\n   📰 %s | 🕒 %s UTC\n   🐋 %s\n   🔗 %s\n\n",
 			i+1, title, s.Label,
-			s.Article.URL,
+			s.Article.Source, t,
 			whaleScoreBar(s.WhaleScore),
-			t,
+			s.Article.URL,
 		))
 	}
 	return sb.String()
@@ -218,10 +351,12 @@ func countKeywords(text string, keywords []string) int {
 }
 
 func whaleScoreBar(score int) string {
-	if score >= 5 {
-		return "█████ высокая"
-	} else if score >= 3 {
-		return "███░░ средняя"
+	switch {
+	case score >= 5:
+		return "█████ высокая активность"
+	case score >= 3:
+		return "███░░ средняя активность"
+	default:
+		return "█░░░░ низкая активность"
 	}
-	return "█░░░░ низкая"
 }

@@ -55,6 +55,8 @@ func (bot *Bot) Register() {
 	bot.tele.Handle("/bybit", bot.protected(bot.handleBybit))
 	bot.tele.Handle("/news", bot.protected(bot.handleNews))
 	bot.tele.Handle("/unlock-tokens", bot.protected(bot.handleUnlockTokens))
+	bot.tele.Handle("/unlock", bot.protected(bot.handleUnlockTokens)) // алиас
+	bot.tele.Handle("/unlocks", bot.protected(bot.handleUnlockTokens)) // алиас
 }
 
 // protected — middleware: nil-проверка sender + rate limit
@@ -441,15 +443,15 @@ func (bot *Bot) handleNews(c tele.Context) error {
 func (bot *Bot) handleUnlockTokens(c tele.Context) error {
 	_ = c.Notify(tele.Typing)
 
-	events, err := bot.unlocks.FetchUpcoming()
+	risks, err := bot.unlocks.FetchHighRisk()
 	if err != nil {
 		log.Printf("unlock-tokens error: %v", err)
-		return send(c, "❌ Не удалось загрузить данные о разлоках. Попробуйте позже.")
+		return send(c, "❌ Не удалось загрузить данные. Попробуйте позже.")
 	}
 
-	msg := unlocks.Format(events)
+	msg := unlocks.Format(risks)
 	if len(msg) > 4000 {
-		msg = msg[:4000] + "\n...(сокращено)"
+		msg = msg[:3990] + "\n...(сокращено)"
 	}
 	return send(c, msg)
 }
