@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -36,17 +37,13 @@ func main() {
 	}
 	log.Printf("✅ Бот запущен: @%s", b.Me.Username)
 
-	// Ограничение по owner (если задан)
-	ownerIDStr := os.Getenv("OWNER_ID")
-	if ownerIDStr != "" {
-		ownerID, err := strconv.ParseInt(ownerIDStr, 10, 64)
-		if err != nil {
-			log.Fatalf("OWNER_ID должен быть числом: %v", err)
-		}
-		b.Use(middleware.Whitelist(ownerID))
-		log.Printf("🔒 Доступ ограничен: owner ID %d", ownerID)
+	// Список разрешённых пользователей из ALLOWED_USERS (через запятую)
+	allowedIDs := parseIDs(os.Getenv("ALLOWED_USERS"))
+	if len(allowedIDs) > 0 {
+		b.Use(middleware.Whitelist(allowedIDs...))
+		log.Printf("🔒 Доступ разрешён для %d пользователей: %v", len(allowedIDs), allowedIDs)
 	} else {
-		log.Println("⚠️  OWNER_ID не задан — бот доступен всем. Добавьте OWNER_ID в .env!")
+		log.Println("⚠️  ALLOWED_USERS не задан — бот доступен всем!")
 	}
 
 	cryptoClient := crypto.NewClient()
@@ -54,6 +51,24 @@ func main() {
 	handler.Register()
 
 	b.Start()
+}
+
+// parseIDs парсит строку "111,222,333" в []int64
+func parseIDs(raw string) []int64 {
+	var ids []int64
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		id, err := strconv.ParseInt(part, 10, 64)
+		if err != nil {
+			log.Printf("⚠️  Некорректный ID в ALLOWED_USERS: %q", part)
+			continue
+		}
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 func mustEnv(key string) string {
