@@ -1,0 +1,11 @@
+# Секреты — никогда не пушим
+.env
+
+# Бинарники
+crypto-bot
+crypto-bot.exe
+
+# База данных
+*.db
+*.db-shm
+*.db-wal
