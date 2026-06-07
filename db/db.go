@@ -29,9 +29,11 @@ func New(path string) (*DB, error) {
 }
 
 func (d *DB) migrate() error {
+	// Создаём таблицу с user_id
 	_, err := d.conn.Exec(`
 		CREATE TABLE IF NOT EXISTS portfolio (
 			id        INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id   INTEGER NOT NULL,
 			symbol    TEXT NOT NULL,
 			name      TEXT NOT NULL,
 			amount    REAL NOT NULL,
@@ -39,19 +41,24 @@ func (d *DB) migrate() error {
 			added_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 		)
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+	// Миграция: добавляем user_id если таблица уже существовала без него
+	_, _ = d.conn.Exec(`ALTER TABLE portfolio ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0`)
+	return nil
 }
 
-func (d *DB) AddPosition(symbol, name string, amount, buyPrice float64) error {
+func (d *DB) AddPosition(userID int64, symbol, name string, amount, buyPrice float64) error {
 	_, err := d.conn.Exec(
-		`INSERT INTO portfolio (symbol, name, amount, buy_price) VALUES (?, ?, ?, ?)`,
-		symbol, name, amount, buyPrice,
+		`INSERT INTO portfolio (user_id, symbol, name, amount, buy_price) VALUES (?, ?, ?, ?, ?)`,
+		userID, symbol, name, amount, buyPrice,
 	)
 	return err
 }
 
-func (d *DB) RemovePosition(id int) error {
-	res, err := d.conn.Exec(`DELETE FROM portfolio WHERE id = ?`, id)
+func (d *DB) RemovePosition(userID int64, id int) error {
+	res, err := d.conn.Exec(`DELETE FROM portfolio WHERE id = ? AND user_id = ?`, id, userID)
 	if err != nil {
 		return err
 	}
@@ -62,9 +69,10 @@ func (d *DB) RemovePosition(id int) error {
 	return nil
 }
 
-func (d *DB) GetPortfolio() ([]Position, error) {
+func (d *DB) GetPortfolio(userID int64) ([]Position, error) {
 	rows, err := d.conn.Query(
-		`SELECT id, symbol, name, amount, buy_price FROM portfolio ORDER BY added_at`,
+		`SELECT id, symbol, name, amount, buy_price FROM portfolio WHERE user_id = ? ORDER BY added_at`,
+		userID,
 	)
 	if err != nil {
 		return nil, err

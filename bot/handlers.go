@@ -47,7 +47,7 @@ func helpText() string {
 
 📊 /market — топ-20 монет по капитализации
 🎯 /recommend — рекомендации к покупке
-💼 /portfolio — ваш портфель и P&L
+💼 /portfolio — ваш личный портфель и P&L
 ➕ /add <символ> <кол-во> <цена> — добавить позицию
 ❌ /remove <ID> — удалить позицию по ID
 
@@ -118,12 +118,14 @@ func (bot *Bot) handleRecommend(c tele.Context) error {
 
 func (bot *Bot) handlePortfolio(c tele.Context) error {
 	_ = c.Notify(tele.Typing)
-	positions, err := bot.db.GetPortfolio()
+	userID := c.Sender().ID
+
+	positions, err := bot.db.GetPortfolio(userID)
 	if err != nil {
 		return send(c, "❌ Ошибка БД: "+err.Error())
 	}
 	if len(positions) == 0 {
-		return send(c, "💼 Портфель пуст.\n\nДобавьте позицию: /add btc 0.5 65000")
+		return send(c, "💼 Ваш портфель пуст.\n\nДобавьте позицию: /add btc 0.5 65000")
 	}
 
 	ids := make([]string, 0, len(positions))
@@ -200,7 +202,9 @@ func (bot *Bot) handleAdd(c tele.Context) error {
 		return send(c, "Использование: /add <символ> <количество> <цена покупки>\nПример: /add btc 0.5 65000")
 	}
 
+	userID := c.Sender().ID
 	symbol := strings.ToLower(args[0])
+
 	amount, err := strconv.ParseFloat(args[1], 64)
 	if err != nil || amount <= 0 {
 		return send(c, "❌ Некорректное количество: "+args[1])
@@ -210,7 +214,6 @@ func (bot *Bot) handleAdd(c tele.Context) error {
 		return send(c, "❌ Некорректная цена: "+args[2])
 	}
 
-	// Ищем монету в CoinGecko для получения названия и ID
 	coins, err := bot.crypto.TopCoins(250)
 	name := strings.ToUpper(symbol)
 	if err == nil {
@@ -223,13 +226,13 @@ func (bot *Bot) handleAdd(c tele.Context) error {
 		}
 	}
 
-	if err := bot.db.AddPosition(symbol, name, amount, buyPrice); err != nil {
+	if err := bot.db.AddPosition(userID, symbol, name, amount, buyPrice); err != nil {
 		return send(c, "❌ Ошибка сохранения: "+err.Error())
 	}
 
 	invested := amount * buyPrice
 	return send(c, fmt.Sprintf(
-		"✅ Добавлено в портфель:\n%s x%s по $%s\nВложено: $%.2f",
+		"✅ Добавлено в ваш портфель:\n%s x%s по $%s\nВложено: $%.2f",
 		name, formatAmount(amount), formatPrice(buyPrice), invested,
 	))
 }
@@ -243,10 +246,11 @@ func (bot *Bot) handleRemove(c tele.Context) error {
 	if err != nil || id <= 0 {
 		return send(c, "❌ Некорректный ID: "+args[0])
 	}
-	if err := bot.db.RemovePosition(id); err != nil {
+	// Удаляем только если позиция принадлежит этому пользователю
+	if err := bot.db.RemovePosition(c.Sender().ID, id); err != nil {
 		return send(c, "❌ "+err.Error())
 	}
-	return send(c, fmt.Sprintf("✅ Позиция #%d удалена из портфеля.", id))
+	return send(c, fmt.Sprintf("✅ Позиция #%d удалена из вашего портфеля.", id))
 }
 
 // helpers
@@ -265,11 +269,4 @@ func formatAmount(a float64) string {
 		return fmt.Sprintf("%.0f", a)
 	}
 	return strconv.FormatFloat(a, 'f', -1, 64)
-}
-
-func absF(v float64) float64 {
-	if v < 0 {
-		return -v
-	}
-	return v
 }
