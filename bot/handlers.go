@@ -4,6 +4,8 @@ import (
 	"crypto-bot/bybit"
 	"crypto-bot/crypto"
 	"crypto-bot/db"
+	"crypto-bot/news"
+	"crypto-bot/unlocks"
 	"fmt"
 	"log"
 	"strconv"
@@ -23,17 +25,21 @@ const (
 )
 
 type Bot struct {
-	tele    *tele.Bot
-	db      *db.DB
-	crypto  *crypto.Client
-	limiter *RateLimiter
+	tele          *tele.Bot
+	db            *db.DB
+	crypto        *crypto.Client
+	news          *news.Client
+	unlocks       *unlocks.Client
+	limiter       *RateLimiter
 }
 
-func New(b *tele.Bot, d *db.DB, c *crypto.Client) *Bot {
+func New(b *tele.Bot, d *db.DB, c *crypto.Client, n *news.Client, u *unlocks.Client) *Bot {
 	return &Bot{
 		tele:    b,
 		db:      d,
 		crypto:  c,
+		news:    n,
+		unlocks: u,
 		limiter: NewRateLimiter(rateLimitCount, rateLimitWindow),
 	}
 }
@@ -47,6 +53,8 @@ func (bot *Bot) Register() {
 	bot.tele.Handle("/remove", bot.protected(bot.handleRemove))
 	bot.tele.Handle("/help", bot.protected(bot.handleHelp))
 	bot.tele.Handle("/bybit", bot.protected(bot.handleBybit))
+	bot.tele.Handle("/news", bot.protected(bot.handleNews))
+	bot.tele.Handle("/unlock-tokens", bot.protected(bot.handleUnlockTokens))
 }
 
 // protected — middleware: nil-проверка sender + rate limit
@@ -88,6 +96,8 @@ func helpText() string {
 ➕ /add <символ> <кол-во> <цена> — добавить позицию
 ❌ /remove <символ> — удалить позицию по названию монеты
 💎 /bybit — баланс вашего Bybit аккаунта
+📰 /news — новости китов + рекомендации
+🔓 /unlock-tokens — предстоящие разлоки токенов
 
 Bybit интеграция:
 /bybit connect <api_key> <api_secret> — подключить аккаунт
@@ -393,6 +403,63 @@ func (bot *Bot) handleBybit(c tele.Context) error {
 	}
 
 	return send(c, bybit.FormatBalance(wb))
+}
+
+func (bot *Bot) handleNews(c tele.Context) error {
+	_ = c.Notify(tele.Typing)
+
+	articles, err := bot.news.FetchLatest()
+	if err != nil {
+		log.Printf("news fetch error: %v", err)
+		return send(c, "❌ Не удалось загрузить новости. Попробуйте позже.")
+	}
+
+	signals := news.Analyze(articles)
+	overall := news.OverallRecommendation(signals)
+	formatted := news.FormatSignals(signals)
+
+	var sb strings.Builder
+	sb.WriteString("📰 Новости китов и крупных держателей\n\n")
+
+	if formatted != "" {
+		sb.WriteString(formatted)
+		sb.WriteString("─────────────────────────\n")
+	}
+
+	sb.WriteString("📊 Итоговая оценка:\n")
+	sb.WriteString(overall)
+	sb.WriteString("\n\n⚠️ Это не финансовый совет. DYOR.")
+
+	// Telegram лимит 4096 символов — режем если нужно
+	msg := sb.String()
+	if len(msg) > 4000 {
+		msg = msg[:4000] + "\n...(сокращено)"
+	}
+	return send(c, msg)
+}
+
+func (bot *Bot) handleUnlockTokens(c tele.Context) error {
+	if bot.unlocks == nil {
+		return send(c,
+			"🔓 Функция разлоков не настроена.\n\n"+
+				"Добавьте ключ в .env:\n"+
+				"COINMARKETCAL_KEY=ваш_ключ\n\n"+
+				"Бесплатный ключ: coinmarketcal.com → API")
+	}
+
+	_ = c.Notify(tele.Typing)
+
+	events, err := bot.unlocks.FetchUpcoming()
+	if err != nil {
+		log.Printf("unlock-tokens error: %v", err)
+		return send(c, "❌ "+err.Error())
+	}
+
+	msg := unlocks.Format(events)
+	if len(msg) > 4000 {
+		msg = msg[:4000] + "\n...(сокращено)"
+	}
+	return send(c, msg)
 }
 
 // helpers

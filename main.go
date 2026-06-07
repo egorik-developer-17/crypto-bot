@@ -4,6 +4,8 @@ import (
 	"crypto-bot/bot"
 	"crypto-bot/crypto"
 	"crypto-bot/db"
+	"crypto-bot/news"
+	"crypto-bot/unlocks"
 	"log"
 	"os"
 	"strconv"
@@ -37,7 +39,7 @@ func main() {
 	}
 	log.Printf("✅ Бот запущен: @%s", b.Me.Username)
 
-	// Список разрешённых пользователей из ALLOWED_USERS (через запятую)
+	// Белый список пользователей
 	allowedIDs := parseIDs(os.Getenv("ALLOWED_USERS"))
 	if len(allowedIDs) > 0 {
 		b.Use(middleware.Whitelist(allowedIDs...))
@@ -46,14 +48,26 @@ func main() {
 		log.Println("⚠️  ALLOWED_USERS не задан — бот доступен всем!")
 	}
 
+	// Новости (бесплатно, без ключа)
+	newsClient := news.NewClient()
+	log.Println("✅ Модуль новостей готов")
+
+	// Разлоки токенов (опционально — нужен ключ CoinMarketCal)
+	var unlocksClient *unlocks.Client
+	if calKey := os.Getenv("COINMARKETCAL_KEY"); calKey != "" {
+		unlocksClient = unlocks.NewClient(calKey)
+		log.Println("✅ Модуль разлоков токенов готов (CoinMarketCal)")
+	} else {
+		log.Println("⚠️  COINMARKETCAL_KEY не задан — /unlock-tokens недоступен")
+	}
+
 	cryptoClient := crypto.NewClient()
-	handler := bot.New(b, database, cryptoClient)
+	handler := bot.New(b, database, cryptoClient, newsClient, unlocksClient)
 	handler.Register()
 
 	b.Start()
 }
 
-// parseIDs парсит строку "111,222,333" в []int64
 func parseIDs(raw string) []int64 {
 	var ids []int64
 	for _, part := range strings.Split(raw, ",") {
