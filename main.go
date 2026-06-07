@@ -52,14 +52,9 @@ func main() {
 	newsClient := news.NewClient()
 	log.Println("✅ Модуль новостей готов")
 
-	// Разлоки токенов (опционально — нужен ключ CoinMarketCal)
-	var unlocksClient *unlocks.Client
-	if calKey := os.Getenv("COINMARKETCAL_KEY"); calKey != "" {
-		unlocksClient = unlocks.NewClient(calKey)
-		log.Println("✅ Модуль разлоков токенов готов (CoinMarketCal)")
-	} else {
-		log.Println("⚠️  COINMARKETCAL_KEY не задан — /unlock-tokens недоступен")
-	}
+	// Разлоки токенов — DeFiLlama (бесплатно, без ключей)
+	unlocksClient := unlocks.NewClient()
+	log.Println("✅ Модуль разлоков токенов готов (DeFiLlama)")
 
 	cryptoClient := crypto.NewClient()
 	handler := bot.New(b, database, cryptoClient, newsClient, unlocksClient)

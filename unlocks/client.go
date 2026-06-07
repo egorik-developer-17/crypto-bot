@@ -10,149 +10,136 @@ import (
 	"time"
 )
 
-// Используем CoinMarketCal API — бесплатный ключ на coinmarketcal.com
+// DeFiLlama Emissions API — бесплатно, без регистрации и ключей
 const (
-	baseURL      = "https://api.coinmarketcal.com/v1"
-	maxBodyBytes = 2 * 1024 * 1024
+	listURL      = "https://defillama-datasets.llama.fi/emissionsProtocolsList"
+	overviewURL  = "https://defillama-datasets.llama.fi/emissionsProtocolOverview/%s.json"
+	maxBodyBytes = 5 * 1024 * 1024
+	maxProtocols = 40 // проверяем топ-40 протоколов
 )
 
 type Client struct {
-	apiKey string
-	http   *http.Client
+	http *http.Client
 }
 
-func NewClient(apiKey string) *Client {
+func NewClient() *Client {
 	return &Client{
-		apiKey: apiKey,
-		http:   &http.Client{Timeout: 12 * time.Second},
+		http: &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
-// ─── Модели ───────────────────────────────────────────────────────────────
-
-type Event struct {
-	Title      string    `json:"title"`
-	Coin       CoinInfo  `json:"coins"`
-	DateEvent  string    `json:"date_event"`
-	CreatedDate string   `json:"created_date"`
-	Source     string    `json:"source"`
-	CanOccur   bool      `json:"can_occur_before"`
-	Percentage float64   `json:"percentage"` // % уверенности события
-	Votes      VoteInfo  `json:"vote_count_up"`
-}
-
-type CoinInfo struct {
-	FullName string `json:"fullname"`
-	Symbol   string `json:"symbol"`
-}
-
-type VoteInfo struct {
-	Up   int `json:"up"`
-	Down int `json:"down"`
-}
-
-type apiResponse struct {
-	Body []rawEvent `json:"body"`
-}
-
-type rawEvent struct {
-	Title       string    `json:"title"`
-	DateEvent   string    `json:"date_event"`
-	CreatedDate string    `json:"created_date"`
-	Source      string    `json:"source"`
-	CanOccur    bool      `json:"can_occur_before"`
-	Percentage  float64   `json:"percentage"`
-	Coins       []CoinInfo `json:"coins"`
-	VoteCount   struct {
-		Up   int `json:"positive"`
-		Down int `json:"negative"`
-	} `json:"vote_count"`
-}
-
-// UnlockEvent — финальная структура разлока
+// UnlockEvent — одно событие разлока
 type UnlockEvent struct {
-	Name      string
-	Symbol    string
-	Title     string
+	Protocol  string
+	Label     string  // название токена/проекта
 	Date      time.Time
 	DaysLeft  int
-	Source    string
-	VotesUp   int
-	VotesDown int
+	Amount    float64 // кол-во токенов
+	USDValue  float64 // ~стоимость в USD (если есть)
+	EventType string  // cliff, linear, etc.
 }
 
-// FetchUpcoming возвращает предстоящие разлоки токенов
-func (c *Client) FetchUpcoming() ([]UnlockEvent, error) {
-	now := time.Now()
-	dateFrom := now.Format("2006-01-02")
-	dateTo := now.AddDate(0, 2, 0).Format("2006-01-02") // следующие 2 месяца
+// ─── Модели DeFiLlama ─────────────────────────────────────────────────────
 
-	url := fmt.Sprintf(
-		"%s/events?max=50&dateRangeStart=%s&dateRangeEnd=%s&categories=Token+Unlock&sortBy=date_event&page=1",
-		baseURL, dateFrom, dateTo,
-	)
+type protocolOverview struct {
+	Name           string           `json:"name"`
+	Symbol         string           `json:"symbol"`
+	CoinGeckoID    string           `json:"coinGeckoId"`
+	Unlockschedule []unlockSchedule `json:"unlockSchedule"`
+	Price          float64          `json:"price"`
+}
 
+type unlockSchedule struct {
+	Timestamp int64   `json:"timestamp"`
+	Amount    float64 `json:"amount"`
+	NoOfCoins float64 `json:"noOfCoins"`
+}
+
+// ─── Получение данных ────────────────────────────────────────────────────
+
+func (c *Client) fetchJSON(url string, out any) error {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("ошибка запроса: %w", err)
+		return err
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("x-api-key", c.apiKey)
+	req.Header.Set("User-Agent", "crypto-bot/1.0")
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("ошибка сети: %w", err)
+		return err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == 401 || resp.StatusCode == 403 {
-		return nil, fmt.Errorf("неверный API-ключ CoinMarketCal. Получите бесплатно на coinmarketcal.com")
-	}
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("CoinMarketCal вернул статус %d", resp.StatusCode)
+		return fmt.Errorf("статус %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if err != nil {
-		return nil, fmt.Errorf("ошибка чтения: %w", err)
+		return err
+	}
+	return json.Unmarshal(body, out)
+}
+
+// FetchUpcoming возвращает предстоящие разлоки из DeFiLlama
+func (c *Client) FetchUpcoming() ([]UnlockEvent, error) {
+	// Шаг 1: получаем список протоколов
+	var protocols []string
+	if err := c.fetchJSON(listURL, &protocols); err != nil {
+		return nil, fmt.Errorf("не удалось получить список протоколов: %w", err)
 	}
 
-	var res apiResponse
-	if err := json.Unmarshal(body, &res); err != nil {
-		return nil, fmt.Errorf("ошибка парсинга: %w", err)
+	if len(protocols) > maxProtocols {
+		protocols = protocols[:maxProtocols]
 	}
+
+	now := time.Now()
+	horizon := now.AddDate(0, 2, 0) // следующие 2 месяца
 
 	var events []UnlockEvent
-	for _, e := range res.Body {
-		date, err := time.Parse("2006-01-02T15:04:05+00:00", e.DateEvent)
-		if err != nil {
-			date, err = time.Parse("2006-01-02", e.DateEvent)
-			if err != nil {
+
+	// Шаг 2: для каждого протокола смотрим расписание разлоков
+	for _, slug := range protocols {
+		var overview protocolOverview
+		url := fmt.Sprintf(overviewURL, slug)
+		if err := c.fetchJSON(url, &overview); err != nil {
+			continue // пропускаем ошибочные
+		}
+
+		for _, sched := range overview.Unlockschedule {
+			eventTime := time.Unix(sched.Timestamp, 0).UTC()
+
+			// Только будущие события в горизонте 2 месяца
+			if eventTime.Before(now) || eventTime.After(horizon) {
 				continue
 			}
-		}
 
-		daysLeft := int(time.Until(date).Hours() / 24)
-		if daysLeft < 0 {
-			continue
-		}
+			amount := sched.NoOfCoins
+			if amount == 0 {
+				amount = sched.Amount
+			}
 
-		name, symbol := "", ""
-		if len(e.Coins) > 0 {
-			name = e.Coins[0].FullName
-			symbol = strings.ToUpper(e.Coins[0].Symbol)
-		}
+			usdValue := 0.0
+			if overview.Price > 0 {
+				usdValue = amount * overview.Price
+			}
 
-		events = append(events, UnlockEvent{
-			Name:      name,
-			Symbol:    symbol,
-			Title:     e.Title,
-			Date:      date,
-			DaysLeft:  daysLeft,
-			Source:    e.Source,
-			VotesUp:   e.VoteCount.Up,
-			VotesDown: e.VoteCount.Down,
-		})
+			label := overview.Name
+			if overview.Symbol != "" {
+				label = fmt.Sprintf("%s (%s)", overview.Name, strings.ToUpper(overview.Symbol))
+			}
+
+			events = append(events, UnlockEvent{
+				Protocol:  slug,
+				Label:     label,
+				Date:      eventTime,
+				DaysLeft:  int(time.Until(eventTime).Hours() / 24),
+				Amount:    amount,
+				USDValue:  usdValue,
+				EventType: "unlock",
+			})
+		}
 	}
 
 	// Сортируем по дате
@@ -160,48 +147,73 @@ func (c *Client) FetchUpcoming() ([]UnlockEvent, error) {
 		return events[i].Date.Before(events[j].Date)
 	})
 
+	// Убираем дубли (один проект может иметь несколько событий)
+	events = deduplicate(events)
+
 	return events, nil
 }
 
-// Format форматирует список разлоков для Telegram
+// deduplicate оставляет для каждого протокола только ближайшее событие
+func deduplicate(events []UnlockEvent) []UnlockEvent {
+	seen := map[string]bool{}
+	var result []UnlockEvent
+	for _, e := range events {
+		if !seen[e.Protocol] {
+			seen[e.Protocol] = true
+			result = append(result, e)
+		}
+	}
+	return result
+}
+
+// ─── Форматирование ───────────────────────────────────────────────────────
+
 func Format(events []UnlockEvent) string {
 	if len(events) == 0 {
 		return "📭 Предстоящих разлоков токенов не найдено на ближайшие 2 месяца."
 	}
 
 	var sb strings.Builder
-	sb.WriteString("🔓 Предстоящие разлоки токенов\n(ближайшие 2 месяца)\n\n")
+	sb.WriteString("🔓 Предстоящие разлоки токенов\n")
+	sb.WriteString("(источник: DeFiLlama • ближайшие 2 месяца)\n\n")
 
-	for i, e := range events {
-		if i >= 15 { // показываем максимум 15
-			break
-		}
+	limit := 15
+	if len(events) < limit {
+		limit = len(events)
+	}
 
-		urgencyEmoji := urgency(e.DaysLeft)
+	for i := 0; i < limit; i++ {
+		e := events[i]
+		emoji := urgencyEmoji(e.DaysLeft)
 		dateStr := e.Date.Format("02.01.2006")
 
-		coinStr := e.Symbol
-		if e.Name != "" && e.Name != e.Symbol {
-			coinStr = fmt.Sprintf("%s (%s)", e.Name, e.Symbol)
+		line := fmt.Sprintf("%s %s\n   📅 %s — через %d дн.\n",
+			emoji, e.Label, dateStr, e.DaysLeft)
+
+		// Объём разлока
+		if e.Amount > 0 {
+			line += fmt.Sprintf("   💰 Объём: %s токенов", formatLargeNumber(e.Amount))
+			if e.USDValue > 0 {
+				line += fmt.Sprintf(" (~$%s)", formatLargeNumber(e.USDValue))
+			}
+			line += "\n"
 		}
 
-		sb.WriteString(fmt.Sprintf(
-			"%s %s\n   📅 %s — через %d дн.\n   %s\n\n",
-			urgencyEmoji,
-			coinStr,
-			dateStr,
-			e.DaysLeft,
-			truncate(e.Title, 80),
-		))
+		// Предупреждение о давлении продавцов
+		if e.USDValue > 50_000_000 { // >$50M — крупный разлок
+			line += "   ⚠️ Крупный разлок — возможное давление продавцов!\n"
+		}
+
+		sb.WriteString(line + "\n")
 	}
 
 	sb.WriteString("─────────────────────────\n")
-	sb.WriteString("🔴 <7 дней  🟡 <30 дней  🟢 >30 дней\n")
-	sb.WriteString("\n⚠️ Крупные разлоки = давление продавцов. Учитывайте в стратегии!")
+	sb.WriteString("🔴 <7 дн.  🟡 <30 дн.  🟢 >30 дн.\n")
+	sb.WriteString("⚠️ Крупные разлоки = риск коррекции. Учитывайте в стратегии!")
 	return sb.String()
 }
 
-func urgency(days int) string {
+func urgencyEmoji(days int) string {
 	switch {
 	case days <= 7:
 		return "🔴"
@@ -212,9 +224,15 @@ func urgency(days int) string {
 	}
 }
 
-func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
+func formatLargeNumber(n float64) string {
+	switch {
+	case n >= 1_000_000_000:
+		return fmt.Sprintf("%.2fB", n/1_000_000_000)
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.2fM", n/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.2fK", n/1_000)
+	default:
+		return fmt.Sprintf("%.2f", n)
 	}
-	return s[:max-3] + "..."
 }

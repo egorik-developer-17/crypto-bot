@@ -439,20 +439,12 @@ func (bot *Bot) handleNews(c tele.Context) error {
 }
 
 func (bot *Bot) handleUnlockTokens(c tele.Context) error {
-	if bot.unlocks == nil {
-		return send(c,
-			"🔓 Функция разлоков не настроена.\n\n"+
-				"Добавьте ключ в .env:\n"+
-				"COINMARKETCAL_KEY=ваш_ключ\n\n"+
-				"Бесплатный ключ: coinmarketcal.com → API")
-	}
-
 	_ = c.Notify(tele.Typing)
 
 	events, err := bot.unlocks.FetchUpcoming()
 	if err != nil {
 		log.Printf("unlock-tokens error: %v", err)
-		return send(c, "❌ "+err.Error())
+		return send(c, "❌ Не удалось загрузить данные о разлоках. Попробуйте позже.")
 	}
 
 	msg := unlocks.Format(events)
