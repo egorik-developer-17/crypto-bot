@@ -533,7 +533,10 @@ func (bot *Bot) handleUnlockTokens(c tele.Context) error {
 		return send(c, "❌ Не удалось загрузить данные. Попробуйте позже.")
 	}
 
-	msg := unlocks.Format(risks)
+	// Параллельно запускаем анализ дат пока пользователь ждёт
+	schedule := bot.unlocks.FetchSchedule(risks)
+
+	msg := unlocks.Format(risks, schedule)
 	if len(msg) > 4000 {
 		msg = msg[:3990] + "\n...(сокращено)"
 	}
