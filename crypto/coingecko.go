@@ -9,21 +9,24 @@ import (
 	"time"
 )
 
-const baseURL = "https://api.coingecko.com/api/v3"
+const (
+	baseURL       = "https://api.coingecko.com/api/v3"
+	maxBodyBytes  = 5 * 1024 * 1024 // 5 MB — защита от OOM
+)
 
 type Coin struct {
-	ID                string  `json:"id"`
-	Symbol            string  `json:"symbol"`
-	Name              string  `json:"name"`
-	CurrentPrice      float64 `json:"current_price"`
-	MarketCap         float64 `json:"market_cap"`
-	MarketCapRank     int     `json:"market_cap_rank"`
-	PriceChange24h    float64 `json:"price_change_percentage_24h"`
-	PriceChange7d     float64 `json:"price_change_percentage_7d_in_currency"`
-	PriceChange30d    float64 `json:"price_change_percentage_30d_in_currency"`
-	ATH               float64 `json:"ath"`
-	ATHChangePercent  float64 `json:"ath_change_percentage"`
-	TotalVolume       float64 `json:"total_volume"`
+	ID               string  `json:"id"`
+	Symbol           string  `json:"symbol"`
+	Name             string  `json:"name"`
+	CurrentPrice     float64 `json:"current_price"`
+	MarketCap        float64 `json:"market_cap"`
+	MarketCapRank    int     `json:"market_cap_rank"`
+	PriceChange24h   float64 `json:"price_change_percentage_24h"`
+	PriceChange7d    float64 `json:"price_change_percentage_7d_in_currency"`
+	PriceChange30d   float64 `json:"price_change_percentage_30d_in_currency"`
+	ATH              float64 `json:"ath"`
+	ATHChangePercent float64 `json:"ath_change_percentage"`
+	TotalVolume      float64 `json:"total_volume"`
 }
 
 type Client struct {
@@ -35,21 +38,36 @@ func NewClient() *Client {
 }
 
 func (c *Client) get(url string, out any) error {
-	req, _ := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return fmt.Errorf("ошибка формирования запроса: %w", err)
+	}
 	req.Header.Set("Accept", "application/json")
+
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("ошибка сети: %w", err)
 	}
 	defer resp.Body.Close()
+
 	if resp.StatusCode == 429 {
-		return fmt.Errorf("CoinGecko rate limit: подождите минуту и попробуйте снова")
+		return fmt.Errorf("CoinGecko rate limit — подождите минуту")
 	}
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("CoinGecko вернул %d", resp.StatusCode)
+		return fmt.Errorf("CoinGecko вернул статус %d", resp.StatusCode)
 	}
-	body, _ := io.ReadAll(resp.Body)
-	return json.Unmarshal(body, out)
+
+	// Ограничиваем размер ответа — защита от OOM
+	limited := io.LimitReader(resp.Body, maxBodyBytes)
+	body, err := io.ReadAll(limited)
+	if err != nil {
+		return fmt.Errorf("ошибка чтения ответа: %w", err)
+	}
+
+	if err := json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("ошибка парсинга ответа: %w", err)
+	}
+	return nil
 }
 
 // TopCoins возвращает топ N монет по капитализации
@@ -63,7 +81,7 @@ func (c *Client) TopCoins(n int) ([]Coin, error) {
 	return coins, c.get(url, &coins)
 }
 
-// PriceBySymbols возвращает цены для списка символов (из портфеля)
+// PriceByIDs возвращает текущие цены для списка CoinGecko ID
 func (c *Client) PriceByIDs(ids []string) (map[string]float64, error) {
 	if len(ids) == 0 {
 		return map[string]float64{}, nil
@@ -83,20 +101,16 @@ func (c *Client) PriceByIDs(ids []string) (map[string]float64, error) {
 	return result, nil
 }
 
-// Recommend анализирует монеты и возвращает рекомендации
+// Recommend анализирует монеты и возвращает топ-5 рекомендаций
 func Recommend(coins []Coin) []Recommendation {
 	var recs []Recommendation
 	for _, c := range coins {
 		score, reasons := analyze(c)
 		if score >= 2 {
-			recs = append(recs, Recommendation{
-				Coin:    c,
-				Score:   score,
-				Reasons: reasons,
-			})
+			recs = append(recs, Recommendation{Coin: c, Score: score, Reasons: reasons})
 		}
 	}
-	// Сортировка по убыванию score (простая)
+	// Сортировка по убыванию score
 	for i := 0; i < len(recs)-1; i++ {
 		for j := i + 1; j < len(recs); j++ {
 			if recs[j].Score > recs[i].Score {
@@ -117,7 +131,6 @@ type Recommendation struct {
 }
 
 func analyze(c Coin) (int, []string) {
-	// Исключаем стейблкоины
 	stable := []string{"usdt", "usdc", "busd", "dai", "tusd", "usdp", "frax"}
 	for _, s := range stable {
 		if strings.EqualFold(c.Symbol, s) {
@@ -128,7 +141,6 @@ func analyze(c Coin) (int, []string) {
 	score := 0
 	var reasons []string
 
-	// Просадка за 24ч — потенциальная точка входа
 	if c.PriceChange24h <= -5 && c.PriceChange24h >= -20 {
 		score += 2
 		reasons = append(reasons, fmt.Sprintf("📉 Просадка за 24ч: %.1f%% (откат)", c.PriceChange24h))
@@ -137,13 +149,11 @@ func analyze(c Coin) (int, []string) {
 		reasons = append(reasons, fmt.Sprintf("⚠️ Сильное падение за 24ч: %.1f%% (высокий риск)", c.PriceChange24h))
 	}
 
-	// Недельный тренд нейтральный/негативный, но не катастрофа
 	if c.PriceChange7d <= -10 && c.PriceChange7d >= -35 {
 		score += 2
 		reasons = append(reasons, fmt.Sprintf("📊 Недельная просадка: %.1f%% (зона интереса)", c.PriceChange7d))
 	}
 
-	// Далеко от ATH — есть потенциал роста
 	if c.ATHChangePercent <= -60 {
 		score += 1
 		reasons = append(reasons, fmt.Sprintf("🏔 От ATH: %.1f%% (большой потенциал)", c.ATHChangePercent))
@@ -152,19 +162,16 @@ func analyze(c Coin) (int, []string) {
 		reasons = append(reasons, fmt.Sprintf("📈 От ATH: %.1f%%", c.ATHChangePercent))
 	}
 
-	// Объём торгов относительно капитализации (высокий = интерес)
 	if c.MarketCap > 0 && c.TotalVolume/c.MarketCap > 0.15 {
 		score += 1
 		reasons = append(reasons, "🔥 Высокий объём торгов")
 	}
 
-	// Топ-50 по капитализации — надёжнее
 	if c.MarketCapRank <= 50 {
 		score += 1
 		reasons = append(reasons, fmt.Sprintf("🥇 Топ-%d по капитализации", c.MarketCapRank))
 	}
 
-	// Рост за 30д при текущем откате — хороший знак
 	if c.PriceChange30d > 10 && c.PriceChange24h < -3 {
 		score += 1
 		reasons = append(reasons, fmt.Sprintf("↗️ Месячный тренд: +%.1f%% (откат на росте)", c.PriceChange30d))
