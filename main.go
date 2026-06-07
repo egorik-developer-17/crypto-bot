@@ -6,6 +6,7 @@ import (
 	"crypto-bot/db"
 	"crypto-bot/news"
 	"crypto-bot/unlocks"
+	"crypto-bot/webapp"
 	"log"
 	"os"
 	"strconv"
@@ -59,6 +60,36 @@ func main() {
 	cryptoClient := crypto.NewClient()
 	handler := bot.New(b, database, cryptoClient, newsClient, unlocksClient)
 	handler.Register()
+
+	// ── Mini App: HTTP-сервер с JSON API ───────────────────────────────
+	webappAddr := getEnv("WEBAPP_ADDR", ":8080")
+	webappURL := os.Getenv("WEBAPP_URL") // публичный HTTPS URL для Telegram
+
+	srv := webapp.NewServer(webapp.Config{
+		Addr:       webappAddr,
+		BotToken:   token,
+		AllowedIDs: allowedIDs,
+		DB:         database,
+		Crypto:     cryptoClient,
+		News:       newsClient,
+		Unlocks:    unlocksClient,
+	})
+	go func() {
+		if err := srv.Start(); err != nil {
+			log.Fatalf("Mini App сервер упал: %v", err)
+		}
+	}()
+
+	// Устанавливаем кнопку меню бота → открывает Mini App
+	if webappURL != "" {
+		if err := bot.SetWebAppMenuButton(b, webappURL); err != nil {
+			log.Printf("⚠️  Не удалось установить WebApp кнопку: %v", err)
+		} else {
+			log.Printf("✅ Mini App доступен: %s", webappURL)
+		}
+	} else {
+		log.Println("⚠️  WEBAPP_URL не задан — Mini App кнопка не установлена")
+	}
 
 	b.Start()
 }

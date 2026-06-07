@@ -1,0 +1,569 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Crypto Bot</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #17212b);
+    --card: var(--tg-theme-secondary-bg-color, #232e3c);
+    --text: var(--tg-theme-text-color, #f5f5f5);
+    --muted: var(--tg-theme-hint-color, #7a8a99);
+    --accent: var(--tg-theme-button-color, #2ea6ff);
+    --accent-text: var(--tg-theme-button-text-color, #fff);
+    --green: #2ecc71;
+    --red: #e74c3c;
+    --yellow: #f1c40f;
+    --border: rgba(255,255,255,0.08);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro", Roboto, sans-serif;
+    font-size: 15px;
+    overscroll-behavior: none;
+  }
+  .app {
+    padding: 12px 12px 80px 12px;
+    max-width: 720px;
+    margin: 0 auto;
+  }
+  h1 {
+    font-size: 20px;
+    margin: 4px 0 14px 0;
+  }
+  .sub { color: var(--muted); font-size: 13px; }
+
+  /* Нижняя навигация */
+  nav.tabs {
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    background: var(--card);
+    border-top: 1px solid var(--border);
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    padding: 6px 4px calc(6px + env(safe-area-inset-bottom));
+    z-index: 100;
+  }
+  nav.tabs button {
+    background: none; border: none;
+    color: var(--muted);
+    font-size: 11px;
+    padding: 6px 2px;
+    cursor: pointer;
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    border-radius: 8px;
+  }
+  nav.tabs button .ico { font-size: 18px; }
+  nav.tabs button.active { color: var(--accent); }
+
+  /* Карточки */
+  .card {
+    background: var(--card);
+    border-radius: 12px;
+    padding: 12px 14px;
+    margin: 8px 0;
+  }
+  .card .row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .card .name { font-weight: 600; }
+  .card .symbol { color: var(--muted); font-size: 12px; text-transform: uppercase; }
+  .card .price { font-weight: 600; }
+  .card .meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .green { color: var(--green); }
+  .red { color: var(--red); }
+  .yellow { color: var(--yellow); }
+
+  /* Топ-строка карточки */
+  .head { display: flex; justify-content: space-between; align-items: center; }
+  .head .rank { color: var(--muted); font-size: 12px; }
+
+  /* Формы */
+  input, button.btn {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-size: 15px;
+    width: 100%;
+  }
+  input:focus { outline: none; border-color: var(--accent); }
+  .form-row { display: grid; gap: 8px; margin: 8px 0; }
+  .form-row.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+  button.btn {
+    background: var(--accent);
+    color: var(--accent-text);
+    border: none;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button.btn.danger { background: var(--red); color: #fff; }
+  button.btn.ghost { background: transparent; border: 1px solid var(--border); color: var(--text); }
+  button.btn:disabled { opacity: 0.5; }
+
+  /* Загрузчик */
+  .loader {
+    text-align: center;
+    padding: 30px;
+    color: var(--muted);
+  }
+  .err {
+    background: rgba(231,76,60,0.15);
+    color: var(--red);
+    padding: 10px 14px;
+    border-radius: 10px;
+    margin: 8px 0;
+    font-size: 13px;
+  }
+  .ok {
+    background: rgba(46,204,113,0.15);
+    color: var(--green);
+    padding: 10px 14px;
+    border-radius: 10px;
+    margin: 8px 0;
+    font-size: 13px;
+  }
+  .label { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  a { color: var(--accent); text-decoration: none; word-break: break-all; }
+
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    margin-left: 6px;
+  }
+  .badge.buy { background: rgba(46,204,113,0.2); color: var(--green); }
+  .badge.sell { background: rgba(231,76,60,0.2); color: var(--red); }
+  .badge.hold { background: rgba(241,196,15,0.2); color: var(--yellow); }
+
+  .empty { text-align: center; color: var(--muted); padding: 30px 12px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div id="content"><div class="loader">Загрузка…</div></div>
+</div>
+
+<nav class="tabs">
+  <button data-tab="market"><span class="ico">📊</span><span>Рынок</span></button>
+  <button data-tab="recommend"><span class="ico">🎯</span><span>Рек.</span></button>
+  <button data-tab="portfolio"><span class="ico">💼</span><span>Портф.</span></button>
+  <button data-tab="news"><span class="ico">📰</span><span>Новости</span></button>
+  <button data-tab="unlocks"><span class="ico">🔓</span><span>Разлок.</span></button>
+  <button data-tab="bybit"><span class="ico">💎</span><span>Bybit</span></button>
+</nav>
+
+<script>
+"use strict";
+
+const tg = window.Telegram?.WebApp;
+if (tg) {
+  tg.ready();
+  tg.expand();
+}
+
+const INIT_DATA = tg?.initData || "";
+const content = document.getElementById("content");
+const tabs = document.querySelectorAll("nav.tabs button");
+
+// ─── Утилиты ───────────────────────────────────────────────────────
+function fmtPrice(p) {
+  if (p == null) return "—";
+  if (p >= 1000) return p.toLocaleString("en-US", {maximumFractionDigits:2});
+  if (p >= 1) return p.toFixed(4);
+  return p.toFixed(8);
+}
+function fmtUSD(v) {
+  if (v == null) return "—";
+  const abs = Math.abs(v);
+  if (abs >= 1e9) return (v/1e9).toFixed(2) + "B";
+  if (abs >= 1e6) return (v/1e6).toFixed(1) + "M";
+  if (abs >= 1e3) return (v/1e3).toFixed(1) + "K";
+  return v.toFixed(2);
+}
+function fmtPct(p) {
+  if (p == null) return "";
+  return (p >= 0 ? "+" : "") + p.toFixed(2) + "%";
+}
+function pctClass(p) {
+  if (p == null) return "";
+  return p >= 0 ? "green" : "red";
+}
+function esc(s) {
+  return String(s).replace(/[<>&"]/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;","\"":"&quot;"}[c]));
+}
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    method: opts.method || "GET",
+    headers: {
+      "X-Telegram-Init-Data": INIT_DATA,
+      "Content-Type": "application/json",
+    },
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || ("Ошибка " + res.status));
+  return data;
+}
+
+function showLoader(text = "Загрузка…") {
+  content.innerHTML = `<div class="loader">${esc(text)}</div>`;
+}
+function showError(err) {
+  content.innerHTML = `<div class="err">⚠️ ${esc(err.message || err)}</div>`;
+}
+
+// ─── Вкладки ───────────────────────────────────────────────────────
+const renderers = {
+  market: renderMarket,
+  recommend: renderRecommend,
+  portfolio: renderPortfolio,
+  news: renderNews,
+  unlocks: renderUnlocks,
+  bybit: renderBybit,
+};
+
+let currentTab = "market";
+function activate(tab) {
+  currentTab = tab;
+  tabs.forEach(b => b.classList.toggle("active", b.dataset.tab === tab));
+  renderers[tab]().catch(showError);
+}
+tabs.forEach(b => b.addEventListener("click", () => activate(b.dataset.tab)));
+
+// ─── Рынок ─────────────────────────────────────────────────────────
+async function renderMarket() {
+  showLoader("Загружаем рынок…");
+  const { coins } = await api("/api/market");
+  let html = `<h1>📊 Топ-20 по капитализации</h1>`;
+  coins.forEach((c, i) => {
+    html += `
+      <div class="card">
+        <div class="head">
+          <div><span class="name">${esc(c.name)}</span> <span class="symbol">${esc(c.symbol)}</span></div>
+          <div class="rank">#${i+1}</div>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <div class="price">$${fmtPrice(c.current_price)}</div>
+          <div class="${pctClass(c.price_change_percentage_24h)}">${fmtPct(c.price_change_percentage_24h)}</div>
+        </div>
+      </div>`;
+  });
+  content.innerHTML = html;
+}
+
+// ─── Рекомендации ──────────────────────────────────────────────────
+async function renderRecommend() {
+  showLoader("Анализируем рынок…");
+  const { recommendations } = await api("/api/recommend");
+  let html = `<h1>🎯 Рекомендации к покупке</h1>
+    <div class="sub">Технический анализ топ-100 монет</div>`;
+  if (!recommendations || recommendations.length === 0) {
+    html += `<div class="empty">🤷 Сейчас нет явных сигналов. Рынок нейтрален.</div>`;
+  } else {
+    recommendations.forEach((r, i) => {
+      const stars = "⭐".repeat(r.Score);
+      const reasons = (r.Reasons || []).map(s => `<div class="meta">• ${esc(s)}</div>`).join("");
+      html += `
+        <div class="card">
+          <div class="head">
+            <div><span class="name">${esc(r.Coin.name)}</span> <span class="symbol">${esc(r.Coin.symbol)}</span></div>
+            <div>${stars}</div>
+          </div>
+          <div class="row" style="margin-top:6px">
+            <div class="price">$${fmtPrice(r.Coin.current_price)}</div>
+          </div>
+          ${reasons}
+        </div>`;
+    });
+    html += `<div class="sub" style="margin-top:12px">⚠️ Это не финансовый совет. DYOR.</div>`;
+  }
+  content.innerHTML = html;
+}
+
+// ─── Портфель ──────────────────────────────────────────────────────
+async function renderPortfolio() {
+  showLoader("Загружаем портфель…");
+  const data = await api("/api/portfolio");
+
+  let html = `<h1>💼 Ваш портфель</h1>`;
+
+  // Форма добавления
+  html += `
+    <div class="card">
+      <div class="label">Добавить позицию</div>
+      <div class="form-row cols-3">
+        <input id="add-sym" placeholder="btc" autocapitalize="off" autocomplete="off">
+        <input id="add-amt" placeholder="0.5" inputmode="decimal">
+        <input id="add-price" placeholder="65000" inputmode="decimal">
+      </div>
+      <button class="btn" id="add-btn">➕ Добавить</button>
+      <div id="add-msg"></div>
+    </div>
+  `;
+
+  if (!data.positions || data.positions.length === 0) {
+    html += `<div class="empty">Портфель пуст. Добавьте первую позицию выше.</div>`;
+  } else {
+    data.positions.forEach(p => {
+      const pnlClass = p.has_current ? (p.pnl >= 0 ? "green" : "red") : "";
+      const pnlLine = p.has_current
+        ? `<div class="row"><span class="meta">P&L</span><span class="${pnlClass}">${fmtPct(p.pnl_percent)} (${p.pnl >= 0 ? "+" : ""}$${p.pnl.toFixed(2)})</span></div>`
+        : `<div class="meta">Цена недоступна</div>`;
+      html += `
+        <div class="card">
+          <div class="head">
+            <div><span class="name">${esc(p.name)}</span> <span class="symbol">${esc(p.symbol)}</span></div>
+            <button class="btn ghost" style="width:auto;padding:6px 10px;font-size:12px"
+              onclick="removePos('${esc(p.symbol)}')">❌</button>
+          </div>
+          <div class="row" style="margin-top:6px"><span class="meta">Количество</span><span>${p.amount}</span></div>
+          <div class="row"><span class="meta">Цена входа</span><span>$${fmtPrice(p.buy_price)}</span></div>
+          <div class="row"><span class="meta">Вложено</span><span>$${p.invested.toFixed(2)}</span></div>
+          ${p.has_current ? `<div class="row"><span class="meta">Сейчас</span><span>$${p.current_value.toFixed(2)}</span></div>` : ""}
+          ${pnlLine}
+        </div>`;
+    });
+
+    // Итого
+    html += `
+      <div class="card">
+        <div class="row"><span class="meta">Всего вложено</span><span>$${data.total_invested.toFixed(2)}</span></div>
+        ${data.has_current ? `
+          <div class="row"><span class="meta">Текущая стоимость</span><span>$${data.total_current.toFixed(2)}</span></div>
+          <div class="row"><span class="meta">Общий P&L</span>
+            <span class="${data.total_pnl >= 0 ? 'green' : 'red'}">
+              ${fmtPct(data.total_pnl_percent)} (${data.total_pnl >= 0 ? '+' : ''}$${data.total_pnl.toFixed(2)})
+            </span>
+          </div>` : ""}
+      </div>`;
+  }
+
+  content.innerHTML = html;
+
+  // Обработчик добавления
+  document.getElementById("add-btn").addEventListener("click", async () => {
+    const sym = document.getElementById("add-sym").value.trim();
+    const amt = parseFloat(document.getElementById("add-amt").value);
+    const price = parseFloat(document.getElementById("add-price").value);
+    const msg = document.getElementById("add-msg");
+    if (!sym || !(amt > 0) || !(price > 0)) {
+      msg.innerHTML = `<div class="err">Заполните все поля корректно</div>`;
+      return;
+    }
+    msg.innerHTML = `<div class="loader" style="padding:8px">…</div>`;
+    try {
+      const r = await api("/api/portfolio/add", { method: "POST", body: { symbol: sym, amount: amt, buy_price: price } });
+      tg?.HapticFeedback?.notificationOccurred("success");
+      msg.innerHTML = `<div class="ok">✅ ${esc(r.name)} добавлен</div>`;
+      setTimeout(() => activate("portfolio"), 600);
+    } catch (e) {
+      tg?.HapticFeedback?.notificationOccurred("error");
+      msg.innerHTML = `<div class="err">${esc(e.message)}</div>`;
+    }
+  });
+}
+
+window.removePos = async function (symbol) {
+  if (!confirm(`Удалить ${symbol} из портфеля?`)) return;
+  try {
+    await api("/api/portfolio/remove", { method: "POST", body: { symbol } });
+    tg?.HapticFeedback?.notificationOccurred("success");
+    activate("portfolio");
+  } catch (e) {
+    alert(e.message);
+  }
+};
+
+// ─── Новости ───────────────────────────────────────────────────────
+async function renderNews() {
+  showLoader("Загружаем новости китов…");
+  const { signals, overall } = await api("/api/news");
+  let html = `<h1>📰 Новости китов</h1>
+    <div class="card"><div class="meta">${esc(overall).replace(/\n/g, "<br>")}</div></div>`;
+
+  if (!signals || signals.length === 0) {
+    html += `<div class="empty">Китовой активности не обнаружено.</div>`;
+  } else {
+    signals.forEach(s => {
+      const label = s.Label || "";
+      let badgeCls = "hold";
+      if (label.includes("BUY")) badgeCls = "buy";
+      else if (label.includes("SELL")) badgeCls = "sell";
+      const date = new Date(s.Article.PublishedAt).toLocaleString("ru-RU", {day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit"});
+      html += `
+        <div class="card">
+          <div class="head">
+            <div class="name" style="flex:1">${esc(s.Article.Title)}</div>
+            <span class="badge ${badgeCls}">${esc(label)}</span>
+          </div>
+          <div class="meta">📰 ${esc(s.Article.Source)} · 🕒 ${date}</div>
+          <a href="${esc(s.Article.URL)}" target="_blank" rel="noopener" style="font-size:12px">Читать →</a>
+        </div>`;
+    });
+  }
+  content.innerHTML = html;
+}
+
+// ─── Разлоки ───────────────────────────────────────────────────────
+async function renderUnlocks() {
+  showLoader("Анализируем разлоки…");
+  const { risks, schedule } = await api("/api/unlocks");
+
+  let html = `<h1>🔓 Разлоки токенов</h1>`;
+
+  // Прогноз дат
+  const dated = (schedule || []).filter(s => s.HasData);
+  if (dated.length > 0) {
+    html += `<div class="sub" style="margin:4px 0 8px">📅 Ближайшие разблокировки (прогноз по on-chain паттернам)</div>`;
+    dated.forEach(s => {
+      let dateLine = "";
+      if (s.EstDate && !s.EstDate.startsWith("0001-")) {
+        const d = new Date(s.EstDate);
+        const days = s.DaysUntil;
+        let when;
+        if (days > 0) when = `через ${days} дн.`;
+        else if (days === 0) when = "сегодня!";
+        else when = `${-days} дн. назад`;
+        dateLine = `<div class="row"><span class="meta">Дата</span><span>${d.toLocaleDateString("ru-RU")} (${when})</span></div>`;
+      }
+      html += `
+        <div class="card">
+          <div class="head"><span class="name">${esc(s.Name)}</span><span class="symbol">${esc(s.Symbol)}</span></div>
+          ${dateLine}
+          ${s.Tokens > 0 ? `<div class="row"><span class="meta">Объём</span><span>~${fmtUSD(s.Tokens)} токенов (~$${fmtUSD(s.USDValue)})</span></div>` : ""}
+          ${s.Frequency ? `<div class="row"><span class="meta">Частота</span><span>${esc(s.Frequency)}</span></div>` : ""}
+        </div>`;
+    });
+  }
+
+  // Риск дилюции
+  html += `<div class="sub" style="margin:14px 0 8px">⚠️ Риск дилюции (топ-10)</div>`;
+  (risks || []).slice(0, 10).forEach((r, i) => {
+    html += `
+      <div class="card">
+        <div class="head">
+          <div><span class="name">${esc(r.Name)}</span> <span class="symbol">${esc(r.Symbol)}</span></div>
+          <span class="rank">#${r.Rank}</span>
+        </div>
+        <div class="meta" style="margin-top:4px">${esc(r.RiskLevel)}</div>
+        <div class="row"><span class="meta">Заблокировано</span><span>${r.LockedPercent.toFixed(1)}% (~$${fmtUSD(r.LockedUSDValue)})</span></div>
+        <div class="row"><span class="meta">Дилюция</span><span>x${r.DilutionPotential.toFixed(1)}</span></div>
+      </div>`;
+  });
+
+  content.innerHTML = html;
+}
+
+// ─── Bybit ─────────────────────────────────────────────────────────
+async function renderBybit() {
+  showLoader("Проверяем Bybit…");
+  let data;
+  try {
+    data = await api("/api/bybit");
+  } catch (e) {
+    // Сервер вернул ошибку (например 502 — баланс не получили), показываем форму ниже
+    content.innerHTML = `<h1>💎 Bybit</h1><div class="err">${esc(e.message)}</div>` + bybitConnectForm();
+    bindBybitForms();
+    return;
+  }
+
+  if (!data.connected) {
+    content.innerHTML = `<h1>💎 Bybit</h1>
+      <div class="sub">Подключите Read-Only API-ключи для просмотра баланса.</div>` + bybitConnectForm();
+    bindBybitForms();
+    return;
+  }
+
+  let html = `<h1>💎 Баланс Bybit</h1>`;
+  (data.balance?.list || []).forEach(acc => {
+    const equity = parseFloat(acc.totalEquity || "0");
+    const pnl = parseFloat(acc.totalUnrealisedPnl || "0");
+    html += `
+      <div class="card">
+        <div class="head"><span class="name">Аккаунт ${esc(acc.accountType)}</span></div>
+        <div class="row" style="margin-top:6px"><span class="meta">Общий баланс</span><span>$${equity.toFixed(2)}</span></div>
+        ${pnl !== 0 ? `<div class="row"><span class="meta">Нереализованный PnL</span><span class="${pnl>=0?'green':'red'}">${pnl>=0?'+':''}$${pnl.toFixed(2)}</span></div>` : ""}
+      </div>`;
+
+    const coins = (acc.coin || []).filter(c => parseFloat(c.walletBalance) > 0);
+    if (coins.length > 0) {
+      html += `<div class="card"><div class="label">Активы</div>`;
+      coins.forEach(c => {
+        const bal = parseFloat(c.walletBalance);
+        const usd = parseFloat(c.usdValue || "0");
+        html += `<div class="row"><span>${esc(c.coin)}: ${bal}</span><span class="meta">~$${usd.toFixed(2)}</span></div>`;
+      });
+      html += `</div>`;
+    }
+  });
+
+  html += `
+    <button class="btn danger" id="bybit-disc">Отключить аккаунт</button>
+  `;
+  content.innerHTML = html;
+  document.getElementById("bybit-disc").addEventListener("click", async () => {
+    if (!confirm("Отключить Bybit аккаунт?")) return;
+    try {
+      await api("/api/bybit/disconnect", { method: "POST" });
+      activate("bybit");
+    } catch (e) {
+      alert(e.message);
+    }
+  });
+}
+
+function bybitConnectForm() {
+  return `
+    <div class="card">
+      <div class="label">API Key</div>
+      <input id="bk-key" placeholder="Bybit API Key" autocomplete="off">
+      <div class="label" style="margin-top:8px">API Secret</div>
+      <input id="bk-sec" placeholder="Bybit API Secret" type="password" autocomplete="off">
+      <div style="height:10px"></div>
+      <button class="btn" id="bk-btn">🔗 Подключить</button>
+      <div id="bk-msg"></div>
+      <div class="meta" style="margin-top:10px">
+        Получить ключи: bybit.com → Profile → API Management → System-generated → Read-Only
+      </div>
+    </div>`;
+}
+function bindBybitForms() {
+  const btn = document.getElementById("bk-btn");
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    const key = document.getElementById("bk-key").value.trim();
+    const sec = document.getElementById("bk-sec").value.trim();
+    const msg = document.getElementById("bk-msg");
+    if (key.length < 10 || sec.length < 10) {
+      msg.innerHTML = `<div class="err">Заполните ключи</div>`;
+      return;
+    }
+    msg.innerHTML = `<div class="loader" style="padding:8px">Проверяем…</div>`;
+    try {
+      await api("/api/bybit/connect", { method: "POST", body: { api_key: key, api_secret: sec } });
+      tg?.HapticFeedback?.notificationOccurred("success");
+      activate("bybit");
+    } catch (e) {
+      tg?.HapticFeedback?.notificationOccurred("error");
+      msg.innerHTML = `<div class="err">${esc(e.message)}</div>`;
+    }
+  });
+}
+
+// ─── Старт ─────────────────────────────────────────────────────────
+if (!INIT_DATA) {
+  content.innerHTML = `<div class="err">⚠️ Откройте это приложение из Telegram-бота.</div>`;
+} else {
+  activate("market");
+}
+</script>
+</body>
+</html>
