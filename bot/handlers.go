@@ -49,9 +49,11 @@ func helpText() string {
 🎯 /recommend — рекомендации к покупке
 💼 /portfolio — ваш личный портфель и P&L
 ➕ /add <символ> <кол-во> <цена> — добавить позицию
-❌ /remove <ID> — удалить позицию по ID
+❌ /remove <символ> — удалить позицию по имени монеты
 
-Пример: /add btc 0.5 65000`
+Примеры:
+/add btc 0.5 65000
+/remove btc`
 }
 
 func (bot *Bot) handleMarket(c tele.Context) error {
@@ -169,7 +171,7 @@ func (bot *Bot) handlePortfolio(c tele.Context) error {
 		}
 
 		sb.WriteString(fmt.Sprintf(
-			"[#%d] %s (%s)\n  Кол-во: %s\n  Цена входа: $%s\n  Вложено: $%.2f%s\n\n",
+			"%d. %s (%s)\n  Кол-во: %s\n  Цена входа: $%s\n  Вложено: $%.2f%s\n\n",
 			p.ID,
 			p.Name,
 			strings.ToUpper(p.Symbol),
@@ -192,7 +194,7 @@ func (bot *Bot) handlePortfolio(c tele.Context) error {
 		sb.WriteString(fmt.Sprintf("%s Общий P&L: %+.2f$ (%.1f%%)", emoji, totalPnl, totalPct))
 	}
 
-	sb.WriteString("\n\nУдалить позицию: /remove <ID>")
+	sb.WriteString("\n\nУдалить позицию: /remove <символ>  (например: /remove btc)")
 	return send(c, sb.String())
 }
 
@@ -240,17 +242,14 @@ func (bot *Bot) handleAdd(c tele.Context) error {
 func (bot *Bot) handleRemove(c tele.Context) error {
 	args := c.Args()
 	if len(args) < 1 {
-		return send(c, "Использование: /remove <ID>\nID видно в /portfolio")
+		return send(c, "Использование: /remove <символ>\nПример: /remove btc")
 	}
-	id, err := strconv.Atoi(args[0])
-	if err != nil || id <= 0 {
-		return send(c, "❌ Некорректный ID: "+args[0])
-	}
-	// Удаляем только если позиция принадлежит этому пользователю
-	if err := bot.db.RemovePosition(c.Sender().ID, id); err != nil {
+	symbol := strings.ToLower(args[0])
+	name, err := bot.db.RemoveBySymbol(c.Sender().ID, symbol)
+	if err != nil {
 		return send(c, "❌ "+err.Error())
 	}
-	return send(c, fmt.Sprintf("✅ Позиция #%d удалена из вашего портфеля.", id))
+	return send(c, fmt.Sprintf("✅ %s удалён из вашего портфеля.", name))
 }
 
 // helpers

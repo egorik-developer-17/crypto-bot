@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -29,7 +30,6 @@ func New(path string) (*DB, error) {
 }
 
 func (d *DB) migrate() error {
-	// Создаём таблицу с user_id
 	_, err := d.conn.Exec(`
 		CREATE TABLE IF NOT EXISTS portfolio (
 			id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,7 +44,6 @@ func (d *DB) migrate() error {
 	if err != nil {
 		return err
 	}
-	// Миграция: добавляем user_id если таблица уже существовала без него
 	_, _ = d.conn.Exec(`ALTER TABLE portfolio ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0`)
 	return nil
 }
@@ -57,21 +56,33 @@ func (d *DB) AddPosition(userID int64, symbol, name string, amount, buyPrice flo
 	return err
 }
 
-func (d *DB) RemovePosition(userID int64, id int) error {
-	res, err := d.conn.Exec(`DELETE FROM portfolio WHERE id = ? AND user_id = ?`, id, userID)
+// RemoveBySymbol удаляет позицию пользователя по символу монеты (например "btc")
+func (d *DB) RemoveBySymbol(userID int64, symbol string) (string, error) {
+	// Ищем запись чтобы вернуть имя монеты в ответе
+	var name string
+	err := d.conn.QueryRow(
+		`SELECT name FROM portfolio WHERE user_id = ? AND (symbol = ? OR name = ?) COLLATE NOCASE LIMIT 1`,
+		userID, strings.ToLower(symbol), symbol,
+	).Scan(&name)
+	if err == sql.ErrNoRows {
+		return "", fmt.Errorf("монета «%s» не найдена в вашем портфеле", symbol)
+	}
 	if err != nil {
-		return err
+		return "", err
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return fmt.Errorf("позиция #%d не найдена", id)
-	}
-	return nil
+
+	_, err = d.conn.Exec(
+		`DELETE FROM portfolio WHERE user_id = ? AND (symbol = ? OR name = ?) COLLATE NOCASE`,
+		userID, strings.ToLower(symbol), symbol,
+	)
+	return name, err
 }
 
 func (d *DB) GetPortfolio(userID int64) ([]Position, error) {
+	// Нумерация позиций — через ROW_NUMBER чтобы всегда была последовательной с 1
 	rows, err := d.conn.Query(
-		`SELECT id, symbol, name, amount, buy_price FROM portfolio WHERE user_id = ? ORDER BY added_at`,
+		`SELECT ROW_NUMBER() OVER (ORDER BY added_at) AS num, symbol, name, amount, buy_price
+		 FROM portfolio WHERE user_id = ? ORDER BY added_at`,
 		userID,
 	)
 	if err != nil {
