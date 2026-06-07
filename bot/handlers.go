@@ -24,26 +24,27 @@ const (
 	rateLimitWindow = time.Minute // ...в минуту на пользователя
 )
 
-// ─── Inline-меню ─────────────────────────────────────────────────────────────
+// ─── Reply-клавиатура (постоянное меню внизу чата) ──────────────────────────
 
-var mainMenu = &tele.ReplyMarkup{}
-
-var (
-	btnMarket    = mainMenu.Data("📊 Рынок", "cb_market")
-	btnRecommend = mainMenu.Data("🎯 Рекомендации", "cb_recommend")
-	btnPortfolio = mainMenu.Data("💼 Портфель", "cb_portfolio")
-	btnBybit     = mainMenu.Data("💎 Bybit", "cb_bybit")
-	btnNews      = mainMenu.Data("📰 Новости китов", "cb_news")
-	btnUnlocks   = mainMenu.Data("🔓 Разлоки", "cb_unlocks")
-	btnHelp      = mainMenu.Data("❓ Помощь", "cb_help")
-)
+var replyMenu = &tele.ReplyMarkup{
+	ResizeKeyboard: true,
+}
 
 func init() {
-	mainMenu.Inline(
-		mainMenu.Row(btnMarket, btnRecommend),
-		mainMenu.Row(btnPortfolio, btnBybit),
-		mainMenu.Row(btnNews, btnUnlocks),
-		mainMenu.Row(btnHelp),
+	replyMenu.Reply(
+		replyMenu.Row(
+			replyMenu.Text("📊 Рынок"),
+			replyMenu.Text("🎯 Рекомендации"),
+			replyMenu.Text("💼 Портфель"),
+		),
+		replyMenu.Row(
+			replyMenu.Text("📰 Новости китов"),
+			replyMenu.Text("🔓 Разлоки"),
+			replyMenu.Text("💎 Bybit"),
+		),
+		replyMenu.Row(
+			replyMenu.Text("❓ Помощь"),
+		),
 	)
 }
 
@@ -70,7 +71,7 @@ func New(b *tele.Bot, d *db.DB, c *crypto.Client, n *news.Client, u *unlocks.Cli
 }
 
 func (bot *Bot) Register() {
-	// Текстовые команды
+	// Слеш-команды
 	bot.tele.Handle("/start", bot.protected(bot.handleStart))
 	bot.tele.Handle("/market", bot.protected(bot.handleMarket))
 	bot.tele.Handle("/recommend", bot.protected(bot.handleRecommend))
@@ -84,14 +85,14 @@ func (bot *Bot) Register() {
 	bot.tele.Handle("/unlock", bot.protected(bot.handleUnlockTokens))  // алиас
 	bot.tele.Handle("/unlocks", bot.protected(bot.handleUnlockTokens)) // алиас
 
-	// Callback-кнопки inline-меню
-	bot.tele.Handle(&btnMarket, bot.protected(bot.handleMarketCallback))
-	bot.tele.Handle(&btnRecommend, bot.protected(bot.handleRecommendCallback))
-	bot.tele.Handle(&btnPortfolio, bot.protected(bot.handlePortfolioCallback))
-	bot.tele.Handle(&btnBybit, bot.protected(bot.handleBybitCallback))
-	bot.tele.Handle(&btnNews, bot.protected(bot.handleNewsCallback))
-	bot.tele.Handle(&btnUnlocks, bot.protected(bot.handleUnlocksCallback))
-	bot.tele.Handle(&btnHelp, bot.protected(bot.handleHelpCallback))
+	// Кнопки Reply-клавиатуры (текст кнопки = обработчик)
+	bot.tele.Handle("📊 Рынок", bot.protected(bot.handleMarket))
+	bot.tele.Handle("🎯 Рекомендации", bot.protected(bot.handleRecommend))
+	bot.tele.Handle("💼 Портфель", bot.protected(bot.handlePortfolio))
+	bot.tele.Handle("📰 Новости китов", bot.protected(bot.handleNews))
+	bot.tele.Handle("🔓 Разлоки", bot.protected(bot.handleUnlockTokens))
+	bot.tele.Handle("💎 Bybit", bot.protected(bot.handleBybit))
+	bot.tele.Handle("❓ Помощь", bot.protected(bot.handleHelp))
 }
 
 // protected — middleware: nil-проверка sender + rate limit
@@ -116,82 +117,35 @@ func send(c tele.Context, text string) error {
 	return c.Send(text)
 }
 
-// sendMenu отправляет текст с inline-меню
-func sendMenu(c tele.Context, text string) error {
-	return c.Send(text, mainMenu)
-}
-
 // ─── Обработчики команд ───────────────────────────────────────────────────────
 
 func (bot *Bot) handleStart(c tele.Context) error {
-	return sendMenu(c, "👋 Добро пожаловать в Crypto Bot!\n\nВыберите действие в меню или введите команду вручную:")
+	return c.Send("👋 Добро пожаловать в Crypto Bot!\n\nИспользуйте меню внизу для навигации:", replyMenu)
 }
 
 func (bot *Bot) handleHelp(c tele.Context) error {
-	return sendMenu(c, helpText())
+	return c.Send(helpText(), replyMenu)
 }
 
 func helpText() string {
 	return `Команды:
 
-📊 /market — топ-20 монет по капитализации
-🎯 /recommend — рекомендации к покупке
-💼 /portfolio — ваш личный портфель и P&L
-➕ /add <символ> <кол-во> <цена> — добавить позицию
-❌ /remove <символ> — удалить позицию по названию монеты
-💎 /bybit — баланс вашего Bybit аккаунта
-📰 /news — новости китов + рекомендации
-🔓 /unlock-tokens — предстоящие разлоки токенов
+📊 Рынок — топ-20 монет по капитализации
+🎯 Рекомендации — сигналы к покупке
+💼 Портфель — ваш личный портфель и P&L
+📰 Новости китов — движения крупных держателей
+🔓 Разлоки — предстоящие разблокировки токенов
+💎 Bybit — баланс вашего Bybit аккаунта
 
-Bybit интеграция:
-/bybit connect <api_key> <api_secret> — подключить аккаунт
-/bybit disconnect — отключить аккаунт
+Дополнительные команды:
+/add <символ> <кол-во> <цена> — добавить позицию
+/remove <символ> — удалить позицию
+/bybit connect <key> <secret> — подключить Bybit
+/bybit disconnect — отключить Bybit
 
 Примеры:
 /add btc 0.5 65000
 /remove btc`
-}
-
-// ─── Callback-обработчики кнопок ─────────────────────────────────────────────
-
-// callbackAnswer подтверждает нажатие кнопки (убирает "часики" в Telegram)
-func callbackAnswer(c tele.Context) {
-	_ = c.Respond()
-}
-
-func (bot *Bot) handleMarketCallback(c tele.Context) error {
-	callbackAnswer(c)
-	return bot.handleMarket(c)
-}
-
-func (bot *Bot) handleRecommendCallback(c tele.Context) error {
-	callbackAnswer(c)
-	return bot.handleRecommend(c)
-}
-
-func (bot *Bot) handlePortfolioCallback(c tele.Context) error {
-	callbackAnswer(c)
-	return bot.handlePortfolio(c)
-}
-
-func (bot *Bot) handleBybitCallback(c tele.Context) error {
-	callbackAnswer(c)
-	return bot.handleBybit(c)
-}
-
-func (bot *Bot) handleNewsCallback(c tele.Context) error {
-	callbackAnswer(c)
-	return bot.handleNews(c)
-}
-
-func (bot *Bot) handleUnlocksCallback(c tele.Context) error {
-	callbackAnswer(c)
-	return bot.handleUnlockTokens(c)
-}
-
-func (bot *Bot) handleHelpCallback(c tele.Context) error {
-	callbackAnswer(c)
-	return sendMenu(c, helpText())
 }
 
 func (bot *Bot) handleMarket(c tele.Context) error {
