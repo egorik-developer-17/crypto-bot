@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"crypto-bot/bybit"
 	"crypto-bot/crypto"
 	"crypto-bot/db"
 	"fmt"
@@ -45,6 +46,7 @@ func (bot *Bot) Register() {
 	bot.tele.Handle("/add", bot.protected(bot.handleAdd))
 	bot.tele.Handle("/remove", bot.protected(bot.handleRemove))
 	bot.tele.Handle("/help", bot.protected(bot.handleHelp))
+	bot.tele.Handle("/bybit", bot.protected(bot.handleBybit))
 }
 
 // protected — middleware: nil-проверка sender + rate limit
@@ -85,6 +87,11 @@ func helpText() string {
 💼 /portfolio — ваш личный портфель и P&L
 ➕ /add <символ> <кол-во> <цена> — добавить позицию
 ❌ /remove <символ> — удалить позицию по названию монеты
+💎 /bybit — баланс вашего Bybit аккаунта
+
+Bybit интеграция:
+/bybit connect <api_key> <api_secret> — подключить аккаунт
+/bybit disconnect — отключить аккаунт
 
 Примеры:
 /add btc 0.5 65000
@@ -315,6 +322,77 @@ func (bot *Bot) handleRemove(c tele.Context) error {
 		return send(c, "❌ "+err.Error())
 	}
 	return send(c, fmt.Sprintf("✅ %s удалён из вашего портфеля.", name))
+}
+
+func (bot *Bot) handleBybit(c tele.Context) error {
+	args := c.Args()
+	userID := c.Sender().ID
+
+	// /bybit connect <key> <secret>
+	if len(args) >= 1 && args[0] == "connect" {
+		if len(args) < 3 {
+			return send(c, "Использование: /bybit connect <api_key> <api_secret>\n\n"+
+				"Как получить ключи:\n"+
+				"1. bybit.com → Профиль → API Management\n"+
+				"2. Create New Key → System-generated\n"+
+				"3. Permissions: Read-Only → Unified Trading\n"+
+				"4. Скопируйте API Key и Secret")
+		}
+
+		apiKey := strings.TrimSpace(args[1])
+		apiSecret := strings.TrimSpace(args[2])
+
+		// Валидация длины ключей
+		if len(apiKey) < 10 || len(apiSecret) < 10 {
+			return send(c, "❌ Некорректные ключи. Проверьте правильность копирования.")
+		}
+		if len(apiKey) > 100 || len(apiSecret) > 100 {
+			return send(c, "❌ Слишком длинные ключи.")
+		}
+
+		// Проверяем что ключи рабочие перед сохранением
+		_ = c.Notify(tele.Typing)
+		client := bybit.NewClient(apiKey, apiSecret)
+		if err := client.Validate(); err != nil {
+			log.Printf("Bybit validate error [user=%d]: %v", userID, err)
+			return send(c, "❌ Не удалось подключиться к Bybit. Проверьте ключи и разрешения.\n\nОшибка: "+err.Error())
+		}
+
+		if err := bot.db.SaveBybitKeys(userID, apiKey, apiSecret); err != nil {
+			log.Printf("SaveBybitKeys error [user=%d]: %v", userID, err)
+			return send(c, "❌ Не удалось сохранить ключи. Попробуйте позже.")
+		}
+
+		return send(c, "✅ Bybit аккаунт успешно подключён!\n\nТеперь используйте /bybit для просмотра баланса.")
+	}
+
+	// /bybit disconnect
+	if len(args) >= 1 && args[0] == "disconnect" {
+		if err := bot.db.DeleteBybitKeys(userID); err != nil {
+			return send(c, "❌ "+err.Error())
+		}
+		return send(c, "✅ Bybit аккаунт отключён.")
+	}
+
+	// /bybit — показать баланс
+	_ = c.Notify(tele.Typing)
+	apiKey, apiSecret, err := bot.db.GetBybitKeys(userID)
+	if err != nil {
+		log.Printf("GetBybitKeys error [user=%d]: %v", userID, err)
+		return send(c, "❌ Ошибка загрузки ключей. Попробуйте позже.")
+	}
+	if apiKey == "" {
+		return send(c, "💎 Bybit аккаунт не подключён.\n\nПодключите командой:\n/bybit connect <api_key> <api_secret>")
+	}
+
+	client := bybit.NewClient(apiKey, apiSecret)
+	wb, err := client.GetWalletBalance()
+	if err != nil {
+		log.Printf("GetWalletBalance error [user=%d]: %v", userID, err)
+		return send(c, "❌ Не удалось получить баланс Bybit.\n\nВозможные причины:\n• Истёк срок действия ключей\n• Нет разрешения на чтение\n• Проблемы с сетью")
+	}
+
+	return send(c, bybit.FormatBalance(wb))
 }
 
 // helpers

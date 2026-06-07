@@ -52,6 +52,52 @@ func (d *DB) migrate() error {
 	}
 	// Миграция для старых БД без user_id — ошибку игнорируем намеренно
 	_, _ = d.conn.Exec(`ALTER TABLE portfolio ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0`)
+
+	// Таблица для Bybit API-ключей (один аккаунт на пользователя)
+	_, err = d.conn.Exec(`
+		CREATE TABLE IF NOT EXISTS bybit_keys (
+			user_id    INTEGER PRIMARY KEY,
+			api_key    TEXT NOT NULL,
+			api_secret TEXT NOT NULL,
+			added_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+		)
+	`)
+	return err
+}
+
+// --- Bybit ключи ---
+
+func (d *DB) SaveBybitKeys(userID int64, apiKey, apiSecret string) error {
+	_, err := d.conn.Exec(`
+		INSERT INTO bybit_keys (user_id, api_key, api_secret)
+		VALUES (?, ?, ?)
+		ON CONFLICT(user_id) DO UPDATE SET api_key = excluded.api_key, api_secret = excluded.api_secret, added_at = CURRENT_TIMESTAMP
+	`, userID, apiKey, apiSecret)
+	if err != nil {
+		return errors.New("не удалось сохранить ключи")
+	}
+	return nil
+}
+
+func (d *DB) GetBybitKeys(userID int64) (apiKey, apiSecret string, err error) {
+	err = d.conn.QueryRow(
+		`SELECT api_key, api_secret FROM bybit_keys WHERE user_id = ?`, userID,
+	).Scan(&apiKey, &apiSecret)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", nil // ключей нет — не ошибка
+	}
+	return apiKey, apiSecret, err
+}
+
+func (d *DB) DeleteBybitKeys(userID int64) error {
+	res, err := d.conn.Exec(`DELETE FROM bybit_keys WHERE user_id = ?`, userID)
+	if err != nil {
+		return errors.New("не удалось удалить ключи")
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return errors.New("Bybit аккаунт не подключён")
+	}
 	return nil
 }
 
